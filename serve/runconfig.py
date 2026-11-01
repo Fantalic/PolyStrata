@@ -42,6 +42,8 @@ EDITABLE = [
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
+    ("context", ("arg", "--max-context"),
+     "Tokens the model's conversation can hold. Changing it takes effect when the model is switched or restarted."),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 

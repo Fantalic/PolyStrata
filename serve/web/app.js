@@ -73,14 +73,14 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
 
 let tab = "chat";
 function showTab(name) {
-  tab = ["chat", "images", "monitor", "about"].includes(name) ? name : "chat";
+  tab = ["chat", "images", "monitor", "models", "about"].includes(name) ? name : "chat";
   for (const b of document.querySelectorAll(".st-tab")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
-  for (const v of ["chat", "images", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
+  for (const v of ["chat", "images", "monitor", "models", "about"]) $(`view-${v}`).hidden = v !== tab;
   if (tab === "images") $("img-prompt").focus();
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
   if (tab === "monitor") loadMcp();
-  if (tab === "about") loadConfig();
+  if (tab === "models") { loadModels(); loadConfig(); }
   if (lastMetrics) render(lastMetrics);
 }
 for (const b of document.querySelectorAll(".st-tab")) b.onclick = () => showTab(b.dataset.tab);
@@ -101,6 +101,14 @@ let health = {model: "strata", images: false, max_context: 0};
 async function loadHealth() {
   try {
     health = await (await fetch("health")).json();
+    // The dropdown shows the context the engine actually holds (/health.max_context), not just the config.
+    const ctxSel = $("context-select");
+    if (ctxSel && health.max_context) {
+      const v = String(health.max_context);
+      if (![...ctxSel.options].some((o) => o.value === v)) ctxSel.add(new Option(`${Math.round(Number(v) / 1024)}K`, v));
+      ctxSel.value = v;
+      ctxSel.dataset.current = v;
+    }
     $("attach-btn").title = health.images ? "Attach a text file or a picture (or drop it here)"
                                           : "Attach a text file (or drop it here)";
     $("chat-empty-sub").textContent = `${health.model} runs on this PC. Nothing leaves it.`;
@@ -124,8 +132,20 @@ async function loadModels() {
     `<option value="${esc(m.id)}"${m.current ? " selected" : ""}${m.status === "unavailable" ? " disabled" : ""}>` +
     `${esc(m.display_name && m.display_name !== m.id ? `${m.display_name} (${m.id})` : m.id)}` +
     `${m.status === "unavailable" ? " - unavailable" : ""}</option>`).join("");
-  sel.hidden = models.length < 2;
+  sel.hidden = false;
   sel.dataset.current = (models.find((m) => m.current) || {}).id || "";
+  const cur = models.find((m) => m.current) || {};
+  const ctxSel = $("context-select");
+  if (ctxSel) {
+    // Prefer the engine's live context when this is the loaded model; the config is the fallback.
+    const actual = (health.model === cur.id && health.max_context) ? health.max_context : cur.context;
+    if (actual) {
+      const v = String(actual);
+      if (![...ctxSel.options].some((o) => o.value === v)) ctxSel.add(new Option(`${Math.round(Number(v) / 1024)}K`, v));
+      ctxSel.value = v;
+      ctxSel.dataset.current = v;
+    }
+  }
 }
 $("model-select").onchange = async () => {
   const sel = $("model-select"), name = sel.value, before = sel.dataset.current;
@@ -482,7 +502,7 @@ async function loadConfig() {
   try { r = await fetch("config", {headers: headers()}); } catch (e) { return; }
   if (!r.ok) { $("cfg-card").hidden = true; return; }       // no run config, an older server, or no key yet
   const c = await r.json();
-  cfgKeys = c.keys || [];
+  cfgKeys = (c.keys || []).filter((k) => k.key !== "context");
   $("cfg-file").textContent = c.file || "";
   $("cfg-form").innerHTML = cfgKeys.map((k, i) => {
     const id = `cfg-${i}`, v = k.value;
@@ -508,25 +528,69 @@ function configValue(k, el) {
   if (k.kind === "number") return Number(s);
   return s;                                         // enum, or names (the server splits them at commas)
 }
-$("cfg-save").addEventListener("click", async () => {
+async function saveConfig() {
   const set = {};
   cfgKeys.forEach((k, i) => {
     const v = configValue(k, $(`cfg-${i}`));
     const old = Array.isArray(k.value) ? k.value.join(", ") : k.value;
     if (JSON.stringify(v) !== JSON.stringify(old ?? null)) set[k.key] = v;
   });
-  if (!Object.keys(set).length) { $("cfg-msg").textContent = "Nothing changed."; return; }
+  if (!Object.keys(set).length) { $("cfg-msg").textContent = "Nothing changed."; return true; }
   try {
     const r = await fetch("config", {method: "POST", headers: headers(true), body: JSON.stringify({set})});
     const b = await r.json();
     if (!r.ok) throw new Error((b.error || {}).message || `HTTP ${r.status}`);
     $("cfg-msg").textContent = b.changed.length
-      ? `Saved (${b.changed.join(", ")}); the earlier file is ${b.file}.bak. Start the model again to use it.` : "Nothing changed.";
+      ? `Saved (${b.changed.join(", ")}); the earlier file is ${b.file}.bak.` : "Nothing changed.";
     loadConfig();
+    return true;
   } catch (e) {
     $("cfg-msg").textContent = "";
     toast("error", "Not saved", String(e.message || e), 6000);
+    return false;
   }
+}
+$("cfg-save").addEventListener("click", saveConfig);
+// Save the context from the top dropdown, then stop and load the current model with it.
+$("ctx-restart").addEventListener("click", async () => {
+  const sel = $("model-select"), name = sel.dataset.current || sel.value;
+  const ctx = Number($("context-select").value);
+  if (!name || !ctx) { toast("warn", "Choose a model and a context window"); return; }
+  toast("info", `Restarting ${name}`, `Stopping it and loading it again with ${ctx / 1024}K tokens.`, 8000);
+  let message = "";
+  try {
+    const r = await fetch("config", {method: "POST", headers: headers(true), body: JSON.stringify({set: {context: ctx}})});
+    if (!r.ok) message = ((await r.json()).error || {}).message || `the server answered ${r.status}`;
+  } catch (e) { message = String(e); }
+  if (!message) {
+    try { await fetch("api/models/unload", {method: "POST", headers: headers(true), body: "{}"}); } catch (e) { /* it was not loaded */ }
+    try {
+      const r = await fetch("api/models/load", {method: "POST", headers: headers(true), body: JSON.stringify({model: name})});
+      if (!r.ok) message = ((await r.json()).error || {}).message || `the server answered ${r.status}`;
+    } catch (e) { message = String(e); }
+  }
+  await loadHealth();
+  await loadModels();
+  if (message) { toast("error", "The model was not restarted", message, 10000); return; }
+  toast("success", `${name} restarted`, `The context window is ${ctx / 1024}K tokens.`);
+});
+// Save the settings, then stop and load the current model so a new context size takes effect now.
+$("cfg-restart").addEventListener("click", async () => {
+  if (!await saveConfig()) return;
+  const sel = $("model-select");
+  const name = sel.dataset.current || sel.value;
+  if (!name) { toast("warn", "No model selected", "Reload the page and try again."); return; }
+  toast("info", `Restarting ${name}`, "The model is stopped and loaded again with the saved settings.", 8000);
+  try { await fetch("api/models/unload", {method: "POST", headers: headers(true), body: "{}"}); } catch (e) {}
+  let message = "";
+  try {
+    const r = await fetch("api/models/load", {method: "POST", headers: headers(true), body: JSON.stringify({model: name})});
+    if (!r.ok) message = ((await r.json()).error || {}).message || `the server answered ${r.status}`;
+  } catch (e) { message = String(e); }
+  await loadHealth();
+  await loadModels();
+  if (message) { toast("error", "The model was not restarted", message, 10000); return; }
+  toast("success", `${name} restarted`, "The new context size is in effect.");
 });
 
 // ------------------------------------------------------------------ Markdown (escaped first, then formatted)

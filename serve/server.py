@@ -3436,7 +3436,13 @@ class Service:
         if target is None:
             raise KeyError(name)
         if target["current"]:
-            self.load()
+            # read the run config again: a Settings change (e.g. the context) is what this restart is for
+            try:
+                with self.gate.use(config_key(target["config"]), lambda: self._switch_to(target),
+                                   timeout=self.switch_wait_s):
+                    pass
+            except TimeoutError:
+                raise ModelBusy("a request is still running; switch when it has finished") from None
             return {**target, "status": "loaded"}
         if target["status"] == "unavailable":
             raise ValueError(f"{target['id']} cannot be loaded: {target['problem']}")
