@@ -72,9 +72,10 @@ async function showDetail() {
 }
 async function refresh() {
   try {
-    const [status, history] = await Promise.all([api("/v1/status"), api("/api/requests")]);
+    const [status, history, queue] = await Promise.all([api("/v1/status"), api("/api/requests"), api("/api/queue")]);
     state = status; records = history.requests;
     status.loaded = history.loaded; status.auto_load = history.auto_load;
+    renderQueue(queue);
     if (selected && !records.some(r => r.id === selected)) {
       selected = detail = null; $("selection").hidden = true; $("no-selection").hidden = false;
     }
@@ -92,6 +93,45 @@ async function refresh() {
     if (!operating) notice(actionError);
   } catch (error) { notice(error.message); text("updated", "Disconnected · retrying"); $("load").disabled = $("unload").disabled = true; }
 }
+function renderQueue(q) {
+  const open = !$("queue-body").hidden;
+  $("aff-on").checked = !!q.settings.enabled;
+  if (document.activeElement !== $("hold-s")) $("hold-s").value = q.settings.hold_s;
+  $("aff-apply").disabled = !open;
+  $("skip-wait").disabled = !open || !(q.hold || q.focused);
+  const state = [];
+  if (q.focused) state.push(`Focused: ${q.focused.snippet || q.focused.id} (waits without timeout for its follow-up)`);
+  if (q.hold) state.push(`Holding the turn for the last conversation's follow-up: ${q.hold.remaining_s} s left`);
+  if (!q.settings.enabled) state.push("Affinity is off: requests take the turn in arrival order.");
+  text("queue-state", state.join("  ·  "));
+  const rows = $("queue-rows");
+  const next = JSON.stringify([q.waiting, q.focused?.id]);
+  if (rows.dataset.stamp === next) return;
+  rows.dataset.stamp = next;
+  rows.replaceChildren();
+  if (!q.waiting.length) {
+    const empty = document.createElement("div"); empty.className = "queue-empty";
+    empty.textContent = "No requests waiting. Queued API calls appear here with their session.";
+    rows.append(empty);
+  }
+  for (const w of q.waiting) {
+    const row = document.createElement("div"); row.className = "qrow";
+    const time = document.createElement("span"); time.className = "qtime"; time.textContent = new Date(w.arrived * 1000).toLocaleTimeString();
+    const tok = document.createElement("span"); tok.className = "qtok"; tok.textContent = `${w.prompt_tokens.toLocaleString()} tok${w.small ? " · small" : ""}`;
+    const tag = document.createElement("span"); tag.className = `tag ${w.state}`; tag.textContent = w.state;
+    const snip = document.createElement("span"); snip.className = "qsnippet"; snip.title = w.snippet || w.id; snip.textContent = w.snippet || w.id;
+    const path = document.createElement("span"); path.className = "qpath"; path.textContent = w.path.replace(/^\/v1/, "");
+    row.append(time, tok, tag, snip, path);
+    const act = document.createElement("button");
+    if (q.focused?.id === w.id) {
+      act.textContent = "Unfocus"; act.onclick = async () => { try { await api("/api/queue/unfocus", {}); await refresh(); } catch (e) { notice(e.message); } };
+    } else {
+      act.textContent = "Focus"; act.onclick = async () => { try { await api("/api/queue/focus", {id: w.id}); await refresh(); } catch (e) { notice(e.message); } };
+    }
+    row.append(act);
+    rows.append(row);
+  }
+}
 async function control(load) {
   actionError = "";
   operating = true; $("load").disabled = $("unload").disabled = true;
@@ -101,6 +141,9 @@ async function control(load) {
   finally { operating = false; await refresh(); }
 }
 $("load").onclick = () => control(true); $("unload").onclick = () => control(false);
+$("queue-toggle").onclick = () => { const hidden = !$("queue-body").hidden; $("queue-body").hidden = hidden; $("queue-toggle").textContent = hidden ? "Show" : "Hide"; $("aff-apply").disabled = hidden; if (!hidden) refresh(); };
+$("aff-apply").onclick = async () => { try { await api("/api/queue/settings", {enabled: $("aff-on").checked, hold_s: Number($("hold-s").value)}); notice(""); await refresh(); } catch (e) { notice(e.message); } };
+$("skip-wait").onclick = async () => { try { await api("/api/queue/skip", {}); await refresh(); } catch (e) { notice(e.message); } };
 $("key").onclick = () => { $("auth").hidden = !$("auth").hidden; if (!$("auth").hidden) $("api-key").focus(); };
 $("auth").onsubmit = async event => { event.preventDefault(); apiKey = $("api-key").value.trim(); sessionStorage.setItem("strata.monitor.key", apiKey); $("auth").hidden = true; await refresh(); };
 $("theme").onclick = () => { const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = theme; localStorage.setItem("strata.theme", theme); };
