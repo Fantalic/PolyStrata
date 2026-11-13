@@ -3,6 +3,7 @@ an unloaded engine and applied when it loads again."""
 import io
 import json
 import queue
+import tempfile
 import unittest
 import urllib.error
 import urllib.request
@@ -71,6 +72,21 @@ class EngineCommand(unittest.TestCase):
         self.assertEqual(engine_args({**cfg, "vram_elastic": True, "vram_segment_mib": 256}),
                          ["--max-context", "8192", "--vram-elastic", "--vram-segment-mib", "256"])
         self.assertEqual(engine_args({**cfg, "vram_elastic": "yes"}), ["--max-context", "8192"])
+
+    def test_config_key_needs_the_engine_to_know_the_flag(self):
+        # A binary without --vram-elastic dies on it before it reads anything, so engine_args degrades
+        # to a note instead: the key stays in the config for a newer engine (the effort_end_args pattern).
+        tmp = tempfile.TemporaryDirectory()
+        with tmp as d:
+            yes = Path(d) / "with-flag.exe"
+            no = Path(d) / "without-flag.exe"
+            yes.write_bytes(b"strata-poly --vram-elastic --vram-reserve-mib")
+            no.write_bytes(b"strata-poly --vram-reserve-mib")
+            cfg = {"args": ["--max-context", "8192"], "vram_elastic": True, "vram_segment_mib": 256}
+            self.assertEqual(engine_args(cfg, exe=str(yes)),
+                             ["--max-context", "8192", "--vram-elastic", "--vram-segment-mib", "256"])
+            self.assertEqual(engine_args(cfg, exe=str(no)), ["--max-context", "8192"])
+            self.assertEqual(engine_args(cfg, exe=str(Path(d) / "gone.exe")), ["--max-context", "8192"])
 
 
 class Route(unittest.TestCase):

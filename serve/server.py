@@ -2618,6 +2618,18 @@ def engine_binary(exe: str, cfg: dict | None = None) -> str:
     return exe
 
 
+def binary_has_flag(exe: str, flag: str, cfg: dict | None = None) -> bool:
+    """True when the engine binary's bytes contain `flag` — the feature probe effort_end_args uses (#458):
+    an option the engine's help does not list can still be checked this way.  False when the file is
+    missing or unreadable, so the caller degrades gracefully (a note instead of an engine that dies on
+    an unknown option)."""
+    try:
+        with open(engine_binary(exe, cfg), "rb") as f:
+            return flag.encode() in f.read()
+    except OSError:
+        return False
+
+
 def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
     """#458 (opt-in): the engine arguments for "effort_position": "end" - the id of "system" as --tail-role-token, so
     the engine checkpoints in front of the trailing effort turn - or None when the config leaves it at the top (the
@@ -2629,8 +2641,7 @@ def effort_end_args(cfg: dict, exe: str, tok) -> list[str] | None:
     if pos == "start":
         return None
     try:
-        with open(engine_binary(exe, cfg), "rb") as f:
-            known = b"--tail-role-token" in f.read()
+        known = binary_has_flag(exe, "--tail-role-token", cfg)
     except OSError:
         known = False
     role = tok.encode("system", parse_special=True)
@@ -2693,7 +2704,7 @@ def layer_split_of(cfg: dict) -> bool:
     return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"]
 
 
-def engine_args(cfg: dict) -> list[str]:
+def engine_args(cfg: dict, exe: str | None = None) -> list[str]:
     """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
     config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32"; see
     layer_split_value)."""
@@ -2718,12 +2729,21 @@ def engine_args(cfg: dict) -> list[str]:
     if layer_split_of(cfg) and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
     # #533 (opt-in): "vram_elastic": true - the expert cache in segments, so POST /v1/vram can give VRAM back to other
-    # programs and take it back; "vram_segment_mib" sets the segment size (the engine's default: 512)
+    # programs and take it back; "vram_segment_mib" sets the segment size (the engine's default: 512).
+    # The flag is only appended when the engine binary knows it: a binary without the option would die on it
+    # before it reads anything (exit code 2), so the key degrades to a note and waits for a newer engine.
     if cfg.get("vram_elastic") is True and "--vram-elastic" not in args:
-        args.append("--vram-elastic")
-        seg = cfg.get("vram_segment_mib")
-        if isinstance(seg, int) and not isinstance(seg, bool) and seg > 0 and "--vram-segment-mib" not in args:
-            args += ["--vram-segment-mib", str(seg)]
+        probe = exe or cfg.get("exe")                   # the caller's exe wins; a config without one skips the probe
+        known = probe is None or binary_has_flag(probe, "--vram-elastic", cfg)
+        if known:
+            args.append("--vram-elastic")
+            seg = cfg.get("vram_segment_mib")
+            if isinstance(seg, int) and not isinstance(seg, bool) and seg > 0 and "--vram-segment-mib" not in args:
+                args += ["--vram-segment-mib", str(seg)]
+        else:
+            print('[strata] "vram_elastic" needs an engine that has --vram-elastic; this one lacks it, so the '
+                  "expert cache stays at its start size (POST /v1/vram is refused). The config key is kept for "
+                  "a newer engine.", flush=True)
     args += parallel_args(cfg, args)
     return learned_profile_args(cfg, args)
 
