@@ -479,6 +479,20 @@ async function pollQueue() {
   }
 }
 
+// drag-and-drop state
+let dragId = null;
+
+async function reorderQueue(order) {
+  try {
+    const r = await fetch("api/queue/reorder", {method: "POST", headers: headers(true),
+                                                body: JSON.stringify({order})});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    await pollQueue();
+  } catch (e) {
+    toast("error", "Reorder failed", e.message);
+  }
+}
+
 function renderQueue(q) {
   const card = $("queue-card");
   card.hidden = false;
@@ -507,11 +521,52 @@ function renderQueue(q) {
     const snip = w.snippet || w.id;
     const shown = snip.length > 90 ? snip.slice(0, 90) + "..." : snip;
     const focused = q.focused && q.focused.id === w.id;
-    return `<tr><td>${esc(t)}</td><td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
+    return `<tr data-id="${esc(w.id)}" draggable="true"><td class="qgrip">${icon("grip")}</td><td>${esc(t)}</td><td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
       <td><span class="st-badge ${cls}">${esc(text)}</span></td>
       <td title="${esc(snip)}">${esc(shown)}</td><td>${esc(w.path.replace(/^\/v1/, ""))}</td>
       <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}" title="${focused ? "Unfocus" : "Focus"}">${focused ? icon("lock-fill") : icon("lock")}</button></td></tr>`;
   }).join("");
+  // drag-and-drop delegation on the tbody
+  rows.addEventListener("dragstart", (e) => {
+    const row = e.target.closest("tr[data-id]");
+    if (!row) return;
+    dragId = row.dataset.id;
+    row.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", dragId);
+  });
+  rows.addEventListener("dragend", (e) => {
+    const row = e.target.closest("tr[data-id]");
+    if (row) row.classList.remove("dragging");
+    dragId = null;
+  });
+  rows.addEventListener("dragover", (e) => {
+    const row = e.target.closest("tr[data-id]");
+    if (!row) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const prev = rows.querySelector("tr[data-id].drag-over");
+    if (prev) prev.classList.remove("drag-over");
+    row.classList.add("drag-over");
+  });
+  rows.addEventListener("dragleave", (e) => {
+    const row = e.target.closest("tr[data-id]");
+    if (row) row.classList.remove("drag-over");
+  });
+  rows.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    const target = e.target.closest("tr[data-id]");
+    if (!target) return;
+    rows.querySelectorAll("tr[data-id].drag-over").forEach(r => r.classList.remove("drag-over"));
+    rows.querySelectorAll("tr[data-id].dragging").forEach(r => r.classList.remove("dragging"));
+    const draggedId = e.dataTransfer.getData("text/plain");
+    if (!draggedId) return;
+    const newOrder = [...rows.querySelectorAll("tr[data-id]")]
+      .map(r => r.dataset.id);
+    const oldOrder = q.waiting.map(w => w.id);
+    if (newOrder.join(",") === oldOrder.join(",")) return;
+    await reorderQueue(newOrder);
+  });
 }
 
 $("queue-show").addEventListener("click", () => {

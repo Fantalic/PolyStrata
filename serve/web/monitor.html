@@ -22,6 +22,12 @@ header{height:70px;padding:0 32px;display:flex;align-items:center;justify-conten
 .qrow .qpath{font:12px var(--st-font-mono);color:var(--st-ink-muted);white-space:nowrap}
 .qrow button{padding:4px 10px;font-size:13px;border-radius:7px}
 .queue-empty{padding:14px 20px;color:var(--st-ink-muted)}
+.qrow{cursor:grab}.qrow:active{cursor:grabbing}
+.qrow.dragging{opacity:.4}
+.qrow.drag-over{border-top:2px solid var(--st-accent)}
+.qrow .qgrip{cursor:grab;color:var(--st-ink-muted);opacity:.5;padding:0 6px;flex-shrink:0}
+.qrow .qgrip:hover{opacity:1}
+.qrow .qgrip svg{width:14px;height:14px;display:block}
 
 </style>
 <script defer src="/web/monitor.js"></script>

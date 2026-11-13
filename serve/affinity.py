@@ -259,3 +259,12 @@ class Affinity:
             return {"settings": dict(self.settings), "waiting": waiting, "hold": hold,
                     "focused": focused, "counters": dict(self.counters),
                     "paused": self.paused, "running": self.running}
+
+    def reorder(self, order: list[str]) -> None:
+        """Reorder the waiting list by ID. IDs not in the current waiting set are ignored.
+        The dict preserves insertion order, so rebuilding it with the given ID order
+        reorders the queue."""
+        with self.lock:
+            if not all(id in self.waiting for id in order):
+                return
+            self.waiting = {id: self.waiting[id] for id in order}

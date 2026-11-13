@@ -127,6 +127,13 @@ main { flex: 1; min-height: 0; display: flex; }
 #queue-body .st-table th, #queue-body .st-table td { white-space: nowrap; padding-inline: 8px; }
 #queue-body td:nth-child(4) { max-width: 480px; overflow: hidden; text-overflow: ellipsis; }
 .queue-state { margin: 0; }
+#queue-body tr[data-id] { cursor: grab; }
+#queue-body tr[data-id]:active { cursor: grabbing; }
+#queue-body tr[data-id].dragging { opacity: .4; }
+#queue-body tr[data-id].drag-over { border-top: 2px solid var(--st-accent); }
+.qgrip { width: 24px; text-align: center; user-select: none; }
+.qgrip .st-icon { width: 14px; height: 14px; color: var(--st-ink-muted); opacity: .5; }
+.qgrip .st-icon:hover { opacity: 1; }
 .table-wrap.all { max-height: 420px; overflow-y: auto; }
 .req-totals { margin: 0; font-size: var(--st-fs-sm); }
 .req-totals:empty { display: none; }

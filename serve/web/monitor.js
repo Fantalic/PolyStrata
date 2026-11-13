@@ -93,6 +93,17 @@ async function refresh() {
     if (!operating) notice(actionError);
   } catch (error) { notice(error.message); text("updated", "Disconnected · retrying"); $("load").disabled = $("unload").disabled = true; }
 }
+
+// ------------------------------------------------------------------ request queue drag-and-drop
+let dragId = null;
+
+async function reorderQueue(order) {
+  try {
+    await api("/api/queue/reorder", {order});
+    await refresh();
+  } catch (e) { notice(e.message); }
+}
+
 function renderQueue(q) {
   const open = !$("queue-body").hidden;
   $("aff-on").checked = !!q.settings.enabled;
@@ -105,7 +116,7 @@ function renderQueue(q) {
   if (!q.settings.enabled) state.push("Affinity is off: requests take the turn in arrival order.");
   text("queue-state", state.join("  ·  "));
   const rows = $("queue-rows");
-  const next = JSON.stringify([q.waiting, q.focused?.id]);
+  const next = JSON.stringify([q.waiting.map(w => w.id), q.focused?.id]);
   if (rows.dataset.stamp === next) return;
   rows.dataset.stamp = next;
   rows.replaceChildren();
@@ -116,6 +127,12 @@ function renderQueue(q) {
   }
   for (const w of q.waiting) {
     const row = document.createElement("div"); row.className = "qrow";
+    row.draggable = true;
+    row.dataset.id = w.id;
+    // grip icon
+    const grip = document.createElement("span"); grip.className = "qgrip";
+    grip.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="icon" style="width:14px;height:14px;display:block"><use href="/web/sprite.svg#i-grip"></use></svg>`;
+    row.append(grip);
     const time = document.createElement("span"); time.className = "qtime"; time.textContent = new Date(w.arrived * 1000).toLocaleTimeString();
     const tok = document.createElement("span"); tok.className = "qtok"; tok.textContent = `${w.prompt_tokens.toLocaleString()} tok${w.small ? " · small" : ""}`;
     const tag = document.createElement("span"); tag.className = `tag ${w.state}`; tag.textContent = w.state;
@@ -131,6 +148,52 @@ function renderQueue(q) {
     row.append(act);
     rows.append(row);
   }
+  // drag-and-drop delegation on the tbody
+  rows.addEventListener("dragstart", (e) => {
+    const row = e.target.closest(".qrow");
+    if (!row) return;
+    dragId = row.dataset.id;
+    row.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", dragId);
+  });
+  rows.addEventListener("dragend", (e) => {
+    const row = e.target.closest(".qrow");
+    if (row) row.classList.remove("dragging");
+    dragId = null;
+  });
+  rows.addEventListener("dragover", (e) => {
+    const row = e.target.closest(".qrow");
+    if (!row) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    // remove previous drag-over, set on target
+    const prev = rows.querySelector(".qrow.drag-over");
+    if (prev) prev.classList.remove("drag-over");
+    row.classList.add("drag-over");
+  });
+  rows.addEventListener("dragleave", (e) => {
+    const row = e.target.closest(".qrow");
+    if (row) row.classList.remove("drag-over");
+  });
+  rows.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    const target = e.target.closest(".qrow");
+    if (!target) return;
+    // remove drag-over from all
+    rows.querySelectorAll(".qrow.drag-over").forEach(r => r.classList.remove("drag-over"));
+    rows.querySelectorAll(".qrow.dragging").forEach(r => r.classList.remove("dragging"));
+    const draggedId = e.dataTransfer.getData("text/plain");
+    if (!draggedId) return;
+    // build new order from visible rows
+    const newOrder = [...rows.querySelectorAll(".qrow")]
+      .filter(r => r.dataset.id)
+      .map(r => r.dataset.id);
+    // check if order actually changed
+    const oldOrder = q.waiting.map(w => w.id);
+    if (newOrder.join(",") === oldOrder.join(",")) return;
+    await reorderQueue(newOrder);
+  });
 }
 async function control(load) {
   actionError = "";
