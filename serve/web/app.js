@@ -80,7 +80,7 @@ function showTab(name) {
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
   if (tab === "monitor") loadMcp();
-  if (tab === "models") { loadModels(); loadConfig(); }
+  if (tab === "models") { loadModels(); loadConfig(); loadVision(); }
   if (lastMetrics) render(lastMetrics);
 }
 for (const b of document.querySelectorAll(".st-tab")) b.onclick = () => showTab(b.dataset.tab);
@@ -734,6 +734,28 @@ $("ctx-restart").addEventListener("click", async () => {
   await loadModels();
   if (message) { toast("error", "The model was not restarted", message, 10000); return; }
   toast("success", `${name} restarted`, `The context window is ${ctx / 1024}K tokens.`);
+});
+// ------------------------------------------------------------------ vision toggle
+async function loadVision() {
+  try {
+    const r = await fetch("api/vision", {headers: headers()});
+    if (!r.ok) return;
+    const s = await r.json();
+    const el = $("vision-status");
+    if (el) el.textContent = s.enabled ? "on" : "off";
+  } catch (e) { /* ignore; the button is still usable */ }
+}
+$("vision-toggle").addEventListener("click", async () => {
+  const el = $("vision-status");
+  const current = el ? el.textContent === "on" : true;
+  const next = !current;
+  try {
+    const r = await fetch("api/vision", {method: "POST", headers: headers(true), body: JSON.stringify({on: next})});
+    if (!r.ok) { const j = await r.json(); toast("error", "Vision toggle", (j.error || {}).message || `server answered ${r.status}`, 8000); return; }
+    const s = await r.json();
+    el.textContent = s.enabled ? "on" : "off";
+    toast("success", `Vision ${next ? "enabled" : "disabled"}`, s.elastic ? "The elastic encoder is now " + (next ? "running" : "stopped") : "The encoder is resident; toggle is informational", 4000);
+  } catch (e) { toast("error", "Vision toggle", String(e), 6000); }
 });
 // Save the settings, then stop and load the current model so a new context size takes effect now.
 $("cfg-restart").addEventListener("click", async () => {

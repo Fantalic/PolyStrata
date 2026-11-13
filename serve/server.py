@@ -3190,6 +3190,7 @@ class Service:
                  vision: Vision | None = None, sampling_defaults: dict | None = None,
                  fit_max_tokens: bool = False):
         self.engine, self.tok, self.template, self.model, self.vision = engine, tokenizer, template, model_name, vision
+        self.vision_enabled = True                    # runtime switch from the Models tab; resets when the server restarts
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.drop_oldest = False                      # #17 (opt-in): a conversation too long loses its oldest turns
         self.preserve_thinking = False                # #25 (opt-in): earlier turns keep their thinking in the prompt
@@ -3821,6 +3822,30 @@ class Service:
             return "down"
         finally:
             self.fifo.release()
+
+    def vision_state(self) -> dict:
+        """The current vision encoder state (enabled, elastic, running) for the Models tab."""
+        v = self.vision
+        return {"present": v is not None,
+                "elastic": bool(v is not None and getattr(v, "elastic", False)),
+                "running": bool(v is not None and hasattr(v, "alive") and v.alive()),
+                "enabled": self.vision_enabled,
+                "idle_s": getattr(v, "elastic_idle_s", None) if v is not None else None}
+
+    def vision_set(self, on: bool) -> dict:
+        """Turn the vision encoder on or off (elastic mode only); returns the new state."""
+        v = self.vision
+        if v is None:
+            raise ValueError("this server has no vision encoder")
+        if not getattr(v, "elastic", False):
+            raise ValueError("the vision encoder is resident in this config; only elastic modes can be toggled")
+        self.vision_enabled = on
+        if on and not v.alive():
+            with self.fifo:                      # same turn rule as an image: waits for the running request
+                self._vision_up()
+        elif not on:
+            self._vision_idle_down(force=True)   # "busy" is fine: the flag blocks pictures, the idle loop downs it
+        return self.vision_state()
 
     def start_vision_idle(self):
         v = self.vision
@@ -4473,6 +4498,8 @@ class Service:
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images")
+            if not self.vision_enabled:
+                raise ValueError("the vision encoder is disabled from the Models tab; enable it before sending images")
             mark, before, around = self.image_marks
 
             def one(text):
@@ -6035,6 +6062,10 @@ def make_handler(svc: Service):
                 if self._authorized():                       # the monitor page's queue panel
                     self._json(200, svc.affinity.view())
                 return
+            if path == "/api/vision":
+                if self._authorized():                       # the Models tab's vision toggle (read is safe like /api/queue)
+                    self._json(200, svc.vision_state())
+                return
             if path == "/api/requests" and svc.api_monitor:
                 if self._authorized():
                     request_id = parse_qs(urlsplit(self.path).query).get("id", [None])[0]
@@ -6219,6 +6250,14 @@ def make_handler(svc: Service):
                             self._json(404, {"error": {"message": "not found"}})
                     except KeyError:
                         self._json(404, {"error": {"message": "no waiting request with that id"}})
+                    return
+                if path == "/api/vision":
+                    if not self._own_page("vision can be switched on or off"):
+                        return
+                    try:
+                        self._json(200, svc.vision_set(bool(req.get("on"))))
+                    except ValueError as e:
+                        self._json(400, {"error": {"message": str(e)}})
                     return
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "
