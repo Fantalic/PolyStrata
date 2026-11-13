@@ -9,7 +9,7 @@ parked conversation, so the switch costs nearly the full prefill.
 
 Affinity admission reorders WHO takes the single-request turn next. It never changes what runs,
 only when. **Off by default**: start the server with `$env:STRATA_AFFINITY = "1"`, or switch it on
-from the monitor page's Request queue panel (`POST /api/queue/settings`).
+from the Request queue panel (`POST /api/queue/settings`).
 
 ## The rules, in order
 
@@ -25,18 +25,25 @@ from the monitor page's Request queue panel (`POST /api/queue/settings`).
    `hold_s` (default 20 s) - the same session's follow-up usually arrives within seconds (a
    tool-call round-trip) and then runs at delta cost. `hold_s` is one knob for both the wait and
    the foreign request's max deferral: when it expires, the waiting foreign request goes.
-4. **Focus mode** (monitor page): pin one conversation; its continuations run first and the server
+4. **Focus mode** (the Request queue panel): pin one conversation; its continuations run first and the server
    waits for the follow-up **without a timeout**, until **Skip** lets exactly one foreign request
    through or **Unfocus** clears it. Small requests keep jumping in throughout.
 
-## The monitor page's Request queue panel
+## The request queue panel
 
-Below the status cards, collapsed until you press Show. One row per waiting request: arrival
-time, prompt tokens (small/big), state (queued / affinity / hold / focus), the last user
-message's first ~100 characters - that is what identifies the opencode session - and the
-endpoint. The panel bar has the Affinity switch, the Hold seconds input (applied to the running
-hold at once), **Skip**, and per-row Focus / Unfocus. Backed by `GET /api/queue` and
-`POST /api/queue/settings|focus|skip|unfocus` (own page + auth, like /load and /unload).
+Two places show it, both fed by `GET /api/queue`:
+
+- **The main page's Monitor tab** (`http://127.0.0.1:8095/#monitor`): the *Request queue* card
+  sits below the Model state card, collapsed until **Show**. That is the poly server's usual UI.
+- **The API monitor** (`/api-monitor`): the same panel below the status cards - only served when
+  the run config has `"api_monitor": true` (it is off by default).
+
+One row per waiting request: arrival time, prompt tokens (small/big), state (queued / affinity /
+hold / focus), the last user message's first ~100 characters - that is what identifies the
+opencode session - and the endpoint. The card bar has the Affinity switch, the Hold seconds
+input (applied to the running hold at once), **Skip**, and per-row **Focus / Unfocus**. Backed by
+`GET /api/queue` and `POST /api/queue/settings|focus|skip|unfocus` (own page + auth, like /load
+and /unload).
 
 ## Knobs (environment; the panel overrides at run time)
 

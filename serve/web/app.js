@@ -251,6 +251,7 @@ function render(m) {
   if (live.queued > 0) setPill("queued", `${live.queued} queued`);
   if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (tab === "monitor") renderConvCache(m.conversation_cache);
+  if (tab === "monitor") pollQueue();
   if (tab === "about") renderAbout(eng, hw, st);
 }
 
@@ -457,6 +458,89 @@ document.addEventListener("click", (e) => {
   if (b) copyText(b.dataset.copy, b);
 });
 $("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (lastMetrics) render(lastMetrics); });
+
+// ------------------------------------------------------------------ request queue (serve/affinity.py)
+// Who waits for the single-request turn: per waiting call its arrival, size, wait reason and the
+// session identifier (the last user message's start), plus the hold and the focus.  The controls
+// POST to /api/queue/... (own page + key, like api/models/load).  An older server has no
+// /api/queue: the card stays hidden (the cc-card pattern).
+const queueBadge = {queued: ["", "queued"], affinity: ["st-badge--queued", "affinity"],
+                    hold: ["st-badge--reading", "hold"], focus: ["st-badge--generating", "focus"]};
+let queueOpen = false;
+
+async function pollQueue() {
+  try {
+    const r = await fetch("api/queue", {headers: headers()});
+    const q = await r.json();
+    if (!r.ok) throw new Error(q?.error?.message || `HTTP ${r.status}`);
+    renderQueue(q);
+  } catch (e) {
+    $("queue-card").hidden = true;                 // no endpoint: an older server
+  }
+}
+
+function renderQueue(q) {
+  const card = $("queue-card");
+  card.hidden = false;
+  const aff = $("queue-aff");
+  if (aff.checked !== q.settings.enabled) aff.checked = q.settings.enabled;
+  const holdIn = $("queue-hold");
+  if (document.activeElement !== holdIn) holdIn.value = q.settings.hold_s;
+  $("queue-skip").disabled = !queueOpen || !(q.hold || q.focused);
+  const lines = [];
+  if (q.focused) lines.push(`Focused: ${q.focused.snippet || q.focused.id} - waits without timeout for its follow-up`);
+  if (q.hold) lines.push(`Holding for the last conversation's follow-up: ${fmt(q.hold.remaining_s, 1)} s left`);
+  if (!q.settings.enabled) lines.push("Affinity is off: requests take the turn in arrival order.");
+  $("queue-state").textContent = lines.join("  |  ");
+  if (!queueOpen) return;                          // collapsed: the table is not shown
+  const rows = $("queue-rows");
+  if (!q.waiting.length) {
+    rows.innerHTML = `<tr><td colspan="6" class="muted">No requests waiting</td></tr>`;
+    return;
+  }
+  rows.innerHTML = q.waiting.map((w) => {
+    const [cls, text] = queueBadge[w.state] || ["", w.state];
+    const t = new Date(w.arrived * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+    const snip = w.snippet || w.id;
+    const shown = snip.length > 90 ? snip.slice(0, 90) + "..." : snip;
+    const focused = q.focused && q.focused.id === w.id;
+    return `<tr><td>${esc(t)}</td><td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
+      <td><span class="st-badge ${cls}">${esc(text)}</span></td>
+      <td title="${esc(snip)}">${esc(shown)}</td><td>${esc(w.path.replace(/^\/v1/, ""))}</td>
+      <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}">${focused ? "Unfocus" : "Focus"}</button></td></tr>`;
+  }).join("");
+}
+
+$("queue-show").addEventListener("click", () => {
+  queueOpen = !queueOpen;
+  $("queue-body").hidden = !queueOpen;
+  $("queue-show").textContent = queueOpen ? "Hide" : "Show";
+  $("queue-show").setAttribute("aria-expanded", String(queueOpen));
+  if (lastMetrics) render(lastMetrics);            // redraw at once instead of a second's gap
+});
+$("queue-aff").addEventListener("change", async () => {
+  const r = await fetch("api/queue/settings", {method: "POST", headers: headers(true),
+                                               body: JSON.stringify({enabled: $("queue-aff").checked})});
+  if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
+});
+$("queue-hold").addEventListener("change", async () => {
+  const v = Number($("queue-hold").value);
+  if (Number.isNaN(v)) return;
+  const r = await fetch("api/queue/settings", {method: "POST", headers: headers(true),
+                                               body: JSON.stringify({hold_s: v})});
+  if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
+});
+$("queue-skip").addEventListener("click", async () => {
+  const r = await fetch("api/queue/skip", {method: "POST", headers: headers(true), body: "{}"});
+  if (!r.ok) toast("error", "Skip failed", `HTTP ${r.status}`);
+});
+$("queue-rows").addEventListener("click", async (e) => {
+  const id = e.target.dataset ? e.target.dataset.queueFocus : undefined;
+  if (id === undefined) return;                    // not one of the row buttons
+  const r = await fetch(id ? "api/queue/focus" : "api/queue/unfocus",
+                        {method: "POST", headers: headers(true), body: JSON.stringify(id ? {id} : {})});
+  if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
+});
 
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
 // Tools from the MCP servers in the run config: the chat offers them to the model (opt-in per request,

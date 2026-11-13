@@ -118,6 +118,15 @@ main { flex: 1; min-height: 0; display: flex; }
   padding-inline: 8px;
 }
 .req-head { display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-2); }
+/* Request queue (serve/affinity.py): the waiting calls, the hold/focus state and the controls. */
+.queue-card { display: flex; flex-direction: column; gap: var(--st-s-3); min-width: 0; }
+.queue-head { display: flex; align-items: center; justify-content: space-between; gap: var(--st-s-2); flex-wrap: wrap; }
+.queue-controls { display: flex; align-items: center; gap: var(--st-s-3); flex-wrap: wrap; }
+.queue-controls label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.queue-hold { height: 30px; padding: 0 8px; width: 5.5rem; font-size: var(--st-fs-sm); }
+#queue-body .st-table th, #queue-body .st-table td { white-space: nowrap; padding-inline: 8px; }
+#queue-body td:nth-child(4) { max-width: 480px; overflow: hidden; text-overflow: ellipsis; }
+.queue-state { margin: 0; }
 .table-wrap.all { max-height: 420px; overflow-y: auto; }
 .req-totals { margin: 0; font-size: var(--st-fs-sm); }
 .req-totals:empty { display: none; }

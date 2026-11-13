@@ -114,6 +114,25 @@
         <div class="st-progress" id="state-progress"><div class="st-progress__bar" id="state-bar" style="width:0%"></div></div>
       </div>
 
+      <div class="st-card queue-card" id="queue-card" hidden>
+        <div class="queue-head">
+          <span class="card-title">Request queue</span>
+          <div class="queue-controls">
+            <label class="muted small"><input type="checkbox" id="queue-aff"> Affinity</label>
+            <label class="muted small">Hold <input class="st-input queue-hold" id="queue-hold" type="number" min="0" max="600" step="1" aria-label="Hold seconds"> s</label>
+            <button class="st-btn st-btn--secondary" id="queue-skip" disabled>Skip wait</button>
+            <button class="st-btn st-btn--secondary" id="queue-show" aria-expanded="false">Show</button>
+          </div>
+        </div>
+        <p class="muted small" id="queue-state"></p>
+        <div class="table-wrap" id="queue-body" hidden>
+          <table class="st-table">
+            <thead><tr><th>Arrived</th><th class="num">Prompt</th><th>State</th><th>Session (last user message)</th><th>Endpoint</th><th></th></tr></thead>
+            <tbody id="queue-rows"><tr><td colspan="6" class="muted">No requests waiting</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="metrics" id="metrics">
         <!-- filled by app.js: Speed, GPU load, VRAM, GPU temp, Power, PCIe, CPU, Disk read -->
       </div>
