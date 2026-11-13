@@ -184,6 +184,7 @@ class Affinity:
                 self.counters["holds"] += 1
             else:
                 self.hold = None                    # a follower (or a small turn): no gap to bridge
+                self.focused = None
 
     # ---- the monitor page's controls ----------------------------------
     def focus(self, id: str) -> dict:
