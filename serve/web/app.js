@@ -466,7 +466,7 @@ $("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (las
 // /api/queue: the card stays hidden (the cc-card pattern).
 const queueBadge = {queued: ["", "queued"], affinity: ["st-badge--queued", "affinity"],
                     hold: ["st-badge--reading", "hold"], focus: ["st-badge--generating", "focus"]};
-let queueOpen = false;
+let queueExpanded = false;
 
 async function pollQueue() {
   try {
@@ -500,16 +500,28 @@ function renderQueue(q) {
   if (aff.checked !== q.settings.enabled) aff.checked = q.settings.enabled;
   const holdIn = $("queue-hold");
   if (document.activeElement !== holdIn) holdIn.value = q.settings.hold_s;
-  $("queue-skip").disabled = !queueOpen || !(q.hold || q.focused);
+  $("queue-skip").disabled = !queueExpanded || !(q.hold || q.focused);
   $("queue-play").hidden = q.paused;
   $("queue-pause").hidden = !q.paused;
+
+  // Collapsed summary text
+  const collapsedText = $("queue-collapsed-text");
+  if (q.focused) {
+    collapsedText.textContent = `Focused: ${q.focused.snippet || q.focused.id}`;
+  } else if (q.paused) {
+    collapsedText.textContent = "Queue is paused";
+  } else {
+    collapsedText.textContent = "No active session";
+  }
+
+  // Expanded state line
   const lines = [];
   if (q.paused) lines.push("Queue is paused: requests wait until you press Play");
   if (q.focused) lines.push(`Focused: ${q.focused.snippet || q.focused.id} - waits without timeout for its follow-up`);
   if (q.hold) lines.push(`Holding for the last conversation's follow-up: ${fmt(q.hold.remaining_s, 1)} s left`);
   if (!q.settings.enabled) lines.push("Affinity is off: requests take the turn in arrival order.");
   $("queue-state").textContent = lines.join("  |  ");
-  if (!queueOpen) return;                          // collapsed: the table is not shown
+  if (!queueExpanded) return;                        // expanded body hidden: stop after summary
   const rows = $("queue-rows");
   if (!q.waiting.length) {
     rows.innerHTML = `<tr><td colspan="6" class="muted">No requests waiting</td></tr>`;
@@ -569,11 +581,10 @@ function renderQueue(q) {
   });
 }
 
-$("queue-show").addEventListener("click", () => {
-  queueOpen = !queueOpen;
-  $("queue-body").hidden = !queueOpen;
-  $("queue-show").textContent = queueOpen ? "Hide" : "Show";
-  $("queue-show").setAttribute("aria-expanded", String(queueOpen));
+$("queue-expand").addEventListener("click", () => {
+  queueExpanded = !queueExpanded;
+  $("queue-expanded").hidden = !queueExpanded;
+  $("queue-expand").setAttribute("aria-expanded", String(queueExpanded));
   if (lastMetrics) render(lastMetrics);            // redraw at once instead of a second's gap
 });
 $("queue-aff").addEventListener("change", async () => {

@@ -123,15 +123,26 @@
             <button class="st-btn st-btn--secondary" id="queue-skip" disabled>Skip wait</button>
             <button class="st-btn st-btn--secondary" id="queue-pause" hidden>Pause</button>
             <button class="st-btn st-btn--secondary" id="queue-play" hidden>Play</button>
-            <button class="st-btn st-btn--secondary" id="queue-show" aria-expanded="false">Show</button>
+            <button class="st-btn st-btn--icon queue-expand-btn" id="queue-expand" aria-expanded="false" aria-label="Expand queue">
+              <svg class="st-icon"><use href="web/sprite.svg#i-chevron"/></svg>
+            </button>
           </div>
         </div>
-        <p class="muted small" id="queue-state"></p>
-        <div class="table-wrap" id="queue-body" hidden>
-          <table class="st-table">
-            <thead><tr><th>Arrived</th><th class="num">Prompt</th><th>State</th><th>Session (last user message)</th><th>Endpoint</th><th></th></tr></thead>
-            <tbody id="queue-rows"><tr><td colspan="6" class="muted">No requests waiting</td></tr></tbody>
-          </table>
+
+        <!-- Collapsed summary (always visible when queue card is shown) -->
+        <div class="queue-collapsed" id="queue-collapsed">
+          <span class="queue-collapsed__text" id="queue-collapsed-text">No active session</span>
+        </div>
+
+        <!-- Expanded body (hidden until user clicks the chevron) -->
+        <div class="queue-expanded" id="queue-expanded" hidden>
+          <p class="muted small" id="queue-state"></p>
+          <div class="table-wrap">
+            <table class="st-table">
+              <thead><tr><th>Arrived</th><th class="num">Prompt</th><th>State</th><th>Session (last user message)</th><th>Endpoint</th><th></th></tr></thead>
+              <tbody id="queue-rows"><tr><td colspan="6" class="muted">No requests waiting</td></tr></tbody>
+            </table>
+          </div>
         </div>
       </div>
 

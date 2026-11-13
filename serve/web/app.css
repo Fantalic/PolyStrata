@@ -87,6 +87,17 @@ main { flex: 1; min-height: 0; display: flex; }
 .badges .st-badge.on { opacity: 1; }
 .state-card__row { display: flex; justify-content: space-between; gap: var(--st-s-4); font-size: var(--st-fs-sm);
                    font-weight: var(--st-fw-medium); font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- queue collapsed / expanded */
+.queue-card { gap: var(--st-s-3); }
+.queue-controls { display: flex; align-items: center; gap: var(--st-s-3); flex-wrap: wrap; }
+.queue-expand-btn { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+                    transition: transform var(--st-dur); }
+.queue-expand-btn[aria-expanded="true"] { transform: rotate(180deg); }
+.queue-collapsed { padding: var(--st-s-2) var(--st-s-3); min-height: 32px; display: flex; align-items: center; }
+.queue-collapsed__text { font-size: var(--st-fs-sm); color: var(--st-ink-muted); white-space: nowrap; overflow: hidden;
+                         text-overflow: ellipsis; }
+.queue-expanded { padding: 0 var(--st-s-3) var(--st-s-3); display: flex; flex-direction: column; gap: var(--st-s-2); }
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--st-s-4); }
 .metric-card { padding: var(--st-s-4) var(--st-s-5); }
 .st-metric__value small { font-size: var(--st-fs-md); font-weight: var(--st-fw-medium); color: var(--st-ink-muted); margin-left: 4px; }
