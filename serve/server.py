@@ -6206,6 +6206,12 @@ def make_handler(svc: Service):
                         elif path == "/api/queue/unfocus":
                             svc.affinity.unfocus()
                             self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/play":
+                            svc.affinity.play()
+                            self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/pause":
+                            svc.affinity.pause()
+                            self._json(200, svc.affinity.view())
                         else:
                             self._json(404, {"error": {"message": "not found"}})
                     except KeyError:

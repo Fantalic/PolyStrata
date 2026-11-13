@@ -112,6 +112,8 @@ class Affinity:
         self.focused: dict | None = None            # {"prefix": [...], "id": ..., "snippet": ...}
         self.skip_once = False                      # Skip: let exactly one foreign request through
         self.counters = {"deferred": 0, "runs": 0, "holds": 0, "skips": 0}
+        self.running = True                   # queue accepts requests (True) or paused (False)
+        self.paused = False                   # True while paused (for symmetry with running)
 
     # ---- registration -------------------------------------------------
     def register(self, id: str | None, ids: list, path: str = "", snippet: str = "") -> Entry | None:
@@ -136,6 +138,8 @@ class Affinity:
         s = self.settings
         if not s["enabled"]:
             return True
+        if not self.running:                # queue paused: hold all big requests
+            return False
         with self.lock:
             if entry.small(s["small_toks"]):        # rule 1: small always runs
                 return True
@@ -205,6 +209,18 @@ class Affinity:
         with self.lock:
             self.skip_once = True
 
+    def pause(self) -> None:
+        """Pause the queue: no new big requests are admitted until play()."""
+        with self.lock:
+            self.running = False
+            self.paused = True
+
+    def play(self) -> None:
+        """Resume the queue: re-evaluate waiting requests."""
+        with self.lock:
+            self.running = True
+            self.paused = False
+
     def set_settings(self, enabled: bool = None, hold_s: float = None, small_toks: int = None,
                      recent_n: int = None) -> dict:
         with self.lock:
@@ -241,4 +257,5 @@ class Affinity:
                 "snippet": "", "at": self.hold["at"]}
             focused = None if self.focused is None else dict(self.focused)
             return {"settings": dict(self.settings), "waiting": waiting, "hold": hold,
-                    "focused": focused, "counters": dict(self.counters)}
+                    "focused": focused, "counters": dict(self.counters),
+                    "paused": self.paused, "running": self.running}

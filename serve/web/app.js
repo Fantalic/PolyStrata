@@ -487,7 +487,10 @@ function renderQueue(q) {
   const holdIn = $("queue-hold");
   if (document.activeElement !== holdIn) holdIn.value = q.settings.hold_s;
   $("queue-skip").disabled = !queueOpen || !(q.hold || q.focused);
+  $("queue-play").hidden = q.paused;
+  $("queue-pause").hidden = !q.paused;
   const lines = [];
+  if (q.paused) lines.push("Queue is paused: requests wait until you press Play");
   if (q.focused) lines.push(`Focused: ${q.focused.snippet || q.focused.id} - waits without timeout for its follow-up`);
   if (q.hold) lines.push(`Holding for the last conversation's follow-up: ${fmt(q.hold.remaining_s, 1)} s left`);
   if (!q.settings.enabled) lines.push("Affinity is off: requests take the turn in arrival order.");
@@ -540,6 +543,14 @@ $("queue-rows").addEventListener("click", async (e) => {
   const r = await fetch(id ? "api/queue/focus" : "api/queue/unfocus",
                         {method: "POST", headers: headers(true), body: JSON.stringify(id ? {id} : {})});
   if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
+});
+$("queue-play").addEventListener("click", async () => {
+  const r = await fetch("api/queue/play", {method: "POST", headers: headers(true), body: "{}"});
+  if (!r.ok) toast("error", "Play failed", `HTTP ${r.status}`);
+});
+$("queue-pause").addEventListener("click", async () => {
+  const r = await fetch("api/queue/pause", {method: "POST", headers: headers(true), body: "{}"});
+  if (!r.ok) toast("error", "Pause failed", `HTTP ${r.status}`);
 });
 
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
