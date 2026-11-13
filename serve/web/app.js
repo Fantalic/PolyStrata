@@ -507,7 +507,7 @@ function renderQueue(q) {
     return `<tr><td>${esc(t)}</td><td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
       <td><span class="st-badge ${cls}">${esc(text)}</span></td>
       <td title="${esc(snip)}">${esc(shown)}</td><td>${esc(w.path.replace(/^\/v1/, ""))}</td>
-      <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}">${focused ? "Unfocus" : "Focus"}</button></td></tr>`;
+      <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}" title="${focused ? "Unfocus" : "Focus"}">${focused ? icon("lock-fill") : icon("lock")}</button></td></tr>`;
   }).join("");
 }
 
