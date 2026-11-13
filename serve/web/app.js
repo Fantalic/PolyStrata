@@ -741,20 +741,30 @@ async function loadVision() {
     const r = await fetch("api/vision", {headers: headers()});
     if (!r.ok) return;
     const s = await r.json();
-    const el = $("vision-status");
-    if (el) el.textContent = s.enabled ? "on" : "off";
+    const b = $("vision-toggle"), el = $("vision-status");
+    if (!s.present) { b.hidden = true; return; }        // no vision in this config: no button
+    b.hidden = false;
+    el.textContent = s.enabled ? "on" : "off";
+    if (!s.elastic) {                                   // resident encoder: always up, nothing to toggle
+      b.disabled = true;
+      b.title = "This config runs the vision encoder always-on. Start with tall-vision to toggle it.";
+    } else {
+      b.disabled = false;
+      b.title = s.running ? "The image encoder is running; it stops by itself when idle."
+                           : "The image encoder is down; a picture (or switching on) starts it.";
+    }
   } catch (e) { /* ignore; the button is still usable */ }
 }
 $("vision-toggle").addEventListener("click", async () => {
-  const el = $("vision-status");
-  const current = el ? el.textContent === "on" : true;
-  const next = !current;
+  if ($("vision-toggle").disabled) return;
+  const next = $("vision-status").textContent !== "on";
   try {
     const r = await fetch("api/vision", {method: "POST", headers: headers(true), body: JSON.stringify({on: next})});
     if (!r.ok) { const j = await r.json(); toast("error", "Vision toggle", (j.error || {}).message || `server answered ${r.status}`, 8000); return; }
     const s = await r.json();
+    const el = $("vision-status");
     el.textContent = s.enabled ? "on" : "off";
-    toast("success", `Vision ${next ? "enabled" : "disabled"}`, s.elastic ? "The elastic encoder is now " + (next ? "running" : "stopped") : "The encoder is resident; toggle is informational", 4000);
+    toast("success", `Vision ${next ? "enabled" : "disabled"}`, "The elastic encoder is now " + (next ? "running" : "stopped"), 4000);
   } catch (e) { toast("error", "Vision toggle", String(e), 6000); }
 });
 // Save the settings, then stop and load the current model so a new context size takes effect now.
