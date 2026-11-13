@@ -71,6 +71,7 @@ from serve.structured import StructuredOutputError, prepare_format, validated_js
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
+from serve.affinity import Affinity, last_user_snippet  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -231,6 +232,7 @@ def focused_recovery_prompt(tok, ids, generated):
 
 LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
 QUEUE_BEAT_S = 10.0         # a request waiting for the single turn sends a keep-alive this often (#1619)
+AFFINITY_RECHECK_S = 1.0    # a request the admission holds re-checks this often (tests shrink it)
 KEEPALIVE_S = 10.0          # a held-back tool argument leaves the stream quiet: ping at least this often
 CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
 # The live tok/s is a rate over a window, not a mean since the first token: a mean reads ~1/elapsed at the first
@@ -3204,6 +3206,12 @@ class Service:
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
+        # Affinity admission (serve/affinity.py, opt-in): $STRATA_AFFINITY=1 turns it on; the monitor
+        # page's queue panel can change these at run time (POST /api/queue/settings).
+        self.affinity = Affinity(enabled=os.environ.get("STRATA_AFFINITY") == "1",
+                                 hold_s=float(os.environ.get("STRATA_AFFINITY_HOLD_S") or 20.0),
+                                 small_toks=int(os.environ.get("STRATA_AFFINITY_SMALL_TOKS") or 4096),
+                                 recent_n=int(os.environ.get("STRATA_AFFINITY_RECENT") or 4))
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
@@ -4153,12 +4161,17 @@ class Service:
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
     def begin_request(self, path, req):
-        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then)."""
+        """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then).
+        Either way the request's light identity (path, the last user message's start) is stashed for
+        the affinity admission: the queue view shows it while the request waits for its turn."""
+        pending = {"id": uuid.uuid4().hex[:12], "path": path, "snippet": last_user_snippet(req)}
+        self.request_trace.pending = pending
         if not self.api_monitor:
             return None
         raw = json.dumps(req, ensure_ascii=False, indent=2)
-        record = {"id": uuid.uuid4().hex[:12], "path": path, "model": req.get("model") or self.model,
+        record = {"id": pending["id"], "path": path, "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
+                  "snippet": pending["snippet"],
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
@@ -4716,6 +4729,17 @@ class Service:
             out.append(m)
         return out
 
+    def _release_turn(self, entry):
+        """The turn is over (ExitStack at `with turn:`'s end): the request leaves the admission
+        registry, then the FIFO goes to the next request (which re-decides with the fresh state)."""
+        self.affinity.unregister(entry.id if entry else None)
+        self.fifo.release()
+
+    def _served_turn(self, ids):
+        """The request's prompt ran on the engine (still holding the FIFO): the admission remembers
+        the conversation and arms the hold when no continuation is already waiting."""
+        self.affinity.served(ids)
+
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
@@ -4804,9 +4828,18 @@ class Service:
         segments = []
         trace = getattr(self.request_trace, "record", None)
         waiting = time.perf_counter()
+        par = bool(getattr(self.engine, "batch", 0))
+        # Affinity admission (serve/affinity.py, opt-in): the request registers while it waits for
+        # the turn, so the monitor page can show it and the admission can match it against the
+        # recently served conversations.  Parallel requests never register: their slots order
+        # themselves (pick_slot).
+        entry = None
+        if not par:
+            pending = getattr(self.request_trace, "pending", None) or {}
+            entry = self.affinity.register(pending.get("id"), ids, pending.get("path", ""),
+                                           pending.get("snippet", ""))
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
         # window (self.status says busy while any runs); one at a time they are self.status / self.rate, as before
-        par = bool(getattr(self.engine, "batch", 0))
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
         with self.status_lock:
@@ -4817,13 +4850,24 @@ class Service:
             if not getattr(self.engine, "batch", 0):
                 # #1619: a request waiting for the single turn sends a keep-alive every QUEUE_BEAT_S, so a client with
                 # a stream idle timeout does not abort a healthy queued request (and its retry read the prompt again);
-                # a client that left while queued gives its place up instead of taking the turn only to cancel there
+                # a client that left while queued gives its place up instead of taking the turn only to cancel there.
+                # With affinity on, a request that took the turn may give it straight back: the admission holds it
+                # while a continuation of the hot conversation waits (or the hold waits for it) - it re-checks every
+                # second and keeps the keep-alives flowing.
                 got = False
                 try:
                     while not got:
+                        was = entry.deferred if entry else False
                         got = self.fifo.acquire(timeout=QUEUE_BEAT_S)
+                        if got and entry is not None and not self.affinity.decide(entry):
+                            if not was:              # one line per wait episode, not every re-check
+                                print(f"[strata] affinity: request {entry.id} waits ({entry.reason}) - "
+                                      f"{entry.plen} tokens, {entry.snippet[:60]!r}", flush=True)
+                            self.fifo.release()          # the admission says: someone else goes first
+                            got = False
+                            time.sleep(AFFINITY_RECHECK_S)   # re-decide about once a second, not in a spin
                         if got:
-                            turn.callback(self.fifo.release)
+                            turn.callback(self._release_turn, entry)
                         elif cancel.is_set():
                             break
                         else:
@@ -4831,8 +4875,10 @@ class Service:
                 except BaseException:                    # the consumer closed us at a ping: no longer queued
                     with self.status_lock:
                         self.status["queued"] -= 1
+                    self.affinity.unregister(entry.id if entry else None)
                     raise
                 if not got:                              # cancelled while queued
+                    self.affinity.unregister(entry.id if entry else None)
                     with self.status_lock:
                         self.status["queued"] -= 1
                     yield "done", {"finish": "cancel", "completion_tokens": 0, "reused": 0, "timings": None,
@@ -4875,6 +4921,8 @@ class Service:
                         rate.clear()                    # the previous request's samples must not leak into this one
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
+                    if entry is not None:            # the conversation is served: ExitStack runs this
+                        turn.callback(self._served_turn, ids)   # before _release_turn (LIFO)
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
                     for ev in opening:
                         yield "event", ev
@@ -5983,6 +6031,10 @@ def make_handler(svc: Service):
                     # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
                     self._json(200, svc.metrics(all_requests="requests=all" in self.path))
                 return
+            if path == "/api/queue":
+                if self._authorized():                       # the monitor page's queue panel
+                    self._json(200, svc.affinity.view())
+                return
             if path == "/api/requests" and svc.api_monitor:
                 if self._authorized():
                     request_id = parse_qs(urlsplit(self.path).query).get("id", [None])[0]
@@ -6135,6 +6187,30 @@ def make_handler(svc: Service):
                 req = json.loads(self._body() or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
+                if path.startswith("/api/queue/"):
+                    # the monitor page's queue controls (same gate as /load and /unload: PolyStrata's
+                    # own page only, so a foreign site cannot reorder the admission)
+                    if not self._own_page("the request queue can be focused or reordered"):
+                        return
+                    try:
+                        if path == "/api/queue/settings":
+                            svc.affinity.set_settings(**{k: req[k] for k in
+                                                         ("enabled", "hold_s", "small_toks", "recent_n")
+                                                         if k in req})
+                            self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/focus":
+                            self._json(200, {**svc.affinity.focus(req.get("id")), **svc.affinity.view()})
+                        elif path == "/api/queue/skip":
+                            svc.affinity.skip()
+                            self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/unfocus":
+                            svc.affinity.unfocus()
+                            self._json(200, svc.affinity.view())
+                        else:
+                            self._json(404, {"error": {"message": "not found"}})
+                    except KeyError:
+                        self._json(404, {"error": {"message": "no waiting request with that id"}})
+                    return
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "
                                                          "whole conversation to POST /v1/responses", code="not_found"))
