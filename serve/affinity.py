@@ -151,6 +151,7 @@ class Affinity:
         self.counters = {"deferred": 0, "runs": 0, "holds": 0, "skips": 0}
         self.running = True                   # queue accepts requests (True) or paused (False)
         self.paused = False                   # True while paused (for symmetry with running)
+        self.paused_requests: set[str] = set()  # individual requests paused by user
 
     # ---- registration -------------------------------------------------
     def register(self, id: str | None, ids: list, path: str = "", snippet: str = "", session_name: str = "",
@@ -186,6 +187,8 @@ class Affinity:
                 self.skip_once = False
                 self.counters["skips"] += 1
                 return True
+            if entry.id in self.paused_requests:      # user paused this request: it never runs
+                return False
             if self.focused:                        # rule 4: focus waits without a timeout
                 ok = _continues(self.focused["prefix"], self.focused["bundle"], entry)
             else:
@@ -302,8 +305,22 @@ class Affinity:
             focused = None if self.focused is None else dict(self.focused)
             return {"settings": dict(self.settings), "waiting": waiting, "hold": hold,
                     "focused": focused, "counters": dict(self.counters),
-                    "paused": self.paused, "running": self.running}
+                    "paused": self.paused, "running": self.running,
+                    "paused_requests": list(self.paused_requests)}
 
+    # ---- pause individual requests ------------------------------------
+    def pause_request(self, id: str) -> None:
+        """Pause a specific request: it will not take the turn until unpause_request is called."""
+        with self.lock:
+            if id in self.waiting:
+                self.paused_requests.add(id)
+
+    def unpause_request(self, id: str) -> None:
+        """Unpause a specific request: it can now take the turn like normal."""
+        with self.lock:
+            self.paused_requests.discard(id)
+
+    # ---- manual reordering --------------------------------------------
     def reorder(self, order: list[str]) -> None:
         """Reorder the waiting list by ID. IDs not in the current waiting set are ignored.
         The dict preserves insertion order, so rebuilding it with the given ID order

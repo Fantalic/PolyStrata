@@ -6282,6 +6282,12 @@ def make_handler(svc: Service):
                         elif path == "/api/queue/reorder":
                             svc.affinity.reorder(req.get("order", []))
                             self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/pause-request":
+                            svc.affinity.pause_request(req.get("id"))
+                            self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/unpause-request":
+                            svc.affinity.unpause_request(req.get("id"))
+                            self._json(200, svc.affinity.view())
                         else:
                             self._json(404, {"error": {"message": "not found"}})
                     except KeyError:

@@ -240,6 +240,9 @@ main { flex: 1; min-height: 0; display: flex; }
 .queue-row td.qgrip:hover {
   color: var(--st-accent);
 }
+.queue-row td .queue-pause-btn {
+  margin-right: 4px;
+}
 .queue-row-expanded td {
   padding: 0 !important;
   border: none !important;
@@ -249,6 +252,17 @@ main { flex: 1; min-height: 0; display: flex; }
 }
 .queue-row:hover {
   background: var(--st-surface-1);
+}
+/* Root session and agent badges in the session column */
+.queue-row td .muted small {
+  margin-left: 4px;
+}
+/* Drag-and-drop states */
+.queue-row.dragging {
+  opacity: 0.5;
+}
+.queue-row.drag-over {
+  border-top: 2px solid var(--st-accent);
 }
 
 /* ---------------------------------------------------------------- narrow screens */

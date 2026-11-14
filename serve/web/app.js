@@ -507,11 +507,17 @@ function renderQueue(q) {
   // Collapsed summary text
   const collapsedText = $("queue-collapsed-text");
   if (q.focused) {
-    collapsedText.textContent = `Session: ${q.focused.snippet || q.focused.id}`;
+    const f = q.focused;
+    const agent = f.agent ? ` · ${f.agent}` : "";
+    const root = f.root_session && f.root_session !== f.session_id ? ` [${f.root_session.slice(0, 8)}]` : "";
+    collapsedText.textContent = `Session: ${f.session_id?.slice(0, 8) || f.id}${root}${agent}`;
   } else if (q.paused) {
     collapsedText.textContent = "Queue is paused";
   } else if (q.waiting.length) {
-    collapsedText.textContent = `Waiting: ${q.waiting[0].session_name || q.waiting[0].snippet || q.waiting[0].id}`;
+    const w = q.waiting[0];
+    const agent = w.agent ? ` · ${w.agent}` : "";
+    const root = w.root_session && w.root_session !== w.session_id ? ` [${w.root_session.slice(0, 8)}]` : "";
+    collapsedText.textContent = `Waiting: ${w.session_id?.slice(0, 8) || w.id}${root}${agent}`;
   } else {
     collapsedText.textContent = "No active session";
   }
@@ -525,33 +531,43 @@ function renderQueue(q) {
   $("queue-state").textContent = lines.join("  |  ");
   if (!queueExpanded) return;                        // expanded body hidden: stop after summary
 
+  // Sort by context size (smaller requests move up)
+  const sorted = [...q.waiting].sort((a, b) => a.prompt_tokens - b.prompt_tokens);
+
   const rows = $("queue-rows");
-  if (!q.waiting.length) {
+  if (!sorted.length) {
     // Only clear if there were rows before (diff-based)
-    const existing = rows.querySelectorAll("tr[data-id]");
+    const existing = rows.querySelectorAll("tr[data-id].queue-row");
     if (existing.length > 0) {
       rows.innerHTML = `<tr><td colspan="6" class="muted">No requests waiting</td></tr>`;
     }
     return;
   }
 
-  // Diff-based update: only change what changed
-  const existing = new Map([...rows.querySelectorAll("tr[data-id]")].map(r => [r.dataset.id, r]));
-  const newIds = new Set(q.waiting.map(w => w.id));
+  // Diff-based update: only change what changed.
+  // Only select main rows (queue-row class) — detail rows have the same data-id and must not conflict.
+  const existing = new Map([...rows.querySelectorAll("tr[data-id].queue-row")].map(r => [r.dataset.id, r]));
+  const newIds = new Set(sorted.map(w => w.id));
 
-  // Remove rows that are no longer waiting
-  existing.forEach((row, id) => {
-    if (!newIds.has(id)) row.remove();
+  // Remove rows that are no longer waiting (both the main row and its detail row)
+  existing.forEach((mainRow, id) => {
+    if (!newIds.has(id)) {
+      const detailRow = rows.querySelector(`tr[data-id="${id}"].queue-row-expanded`);
+      if (detailRow) detailRow.remove();
+      mainRow.remove();
+    }
   });
 
   // Update or create rows
-  for (const w of q.waiting) {
-    let row = existing.get(w.id);
-    if (!row) {
-      row = createQueueRow(w);
-      rows.appendChild(row);
+  for (const w of sorted) {
+    let mainRow = existing.get(w.id);
+    if (!mainRow) {
+      const { mainRow: newRow, detailRow } = createQueueRow(w);
+      rows.appendChild(newRow);
+      rows.appendChild(detailRow);
+      existing.set(w.id, newRow);
     } else {
-      updateQueueRow(row, w);
+      updateQueueRow({ mainRow, detailRow: rows.querySelector(`tr[data-id="${w.id}"].queue-row-expanded`) }, w);
     }
   }
 }
@@ -564,27 +580,42 @@ function createQueueRow(w) {
   const sessionName = w.session_name || snip;
   const sessionShown = sessionName.length > 60 ? sessionName.slice(0, 60) + "..." : sessionName;
   const focused = w.id === $("queue-card")?.querySelector(":scope > div.queue-expanded")?.dataset?.focusedId;
+  const agent = w.agent ? `<span class="muted small" title="Agent: ${esc(w.agent)}">· ${esc(w.agent)}</span>` : "";
+  const root = w.root_session && w.root_session !== w.session_id
+    ? `<span class="muted small" title="Root session: ${esc(w.root_session)}">[${esc(w.root_session.slice(0, 8))}]</span>`
+    : "";
 
   const mainRow = document.createElement("tr");
   mainRow.className = "queue-row";
   mainRow.dataset.id = w.id;
   mainRow.dataset.focused = focused ? "true" : "";
+  const isPaused = w.paused && w.paused.includes(w.id);
   mainRow.innerHTML = `
     <td class="qgrip" data-action="expand">${icon("grip")}</td>
     <td class="muted small">${esc(t)}</td>
     <td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
     <td><span class="st-badge ${cls}">${esc(text)}</span></td>
-    <td title="${esc(sessionName)}">${esc(sessionShown)}</td>
+    <td title="${esc(sessionName)}">${esc(sessionShown)}${root}${agent}</td>
     <td class="muted small">${esc(w.path.replace(/^\/v1/, ""))}</td>
-    <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}" title="${focused ? "Unfocus" : "Focus"}">${focused ? icon("lock-fill") : icon("lock")}</button></td>`;
+    <td>
+      <button class="st-btn st-btn--secondary queue-pause-btn" data-pause-id="${isPaused ? "" : w.id}" title="${isPaused ? "Unpause" : "Pause"}">
+        ${isPaused ? icon("play") : icon("pause")}
+      </button>
+      <button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}" title="${focused ? "Unfocus" : "Focus"}">
+        ${focused ? icon("lock-fill") : icon("lock")}
+      </button>
+    </td>`;
 
   const detailRow = document.createElement("tr");
   detailRow.className = "queue-row-expanded";
   detailRow.dataset.id = w.id;
   detailRow.hidden = true;
   detailRow.innerHTML = `
-    <td colspan="6">
+    <td colspan="7">
       <div class="queue-expanded-detail">
+        <div><strong>Session ID:</strong> <span class="detail-session-id">${esc(w.session_id || w.id)}</span></div>
+        <div><strong>Root session:</strong> <span class="detail-root">${esc(w.root_session || w.session_id || "")}</span></div>
+        <div><strong>Agent:</strong> <span class="detail-agent">${esc(w.agent || "—")}</span></div>
         <div><strong>Session name:</strong> <span class="detail-session">${esc(sessionName)}</span></div>
         <div><strong>Last user message:</strong> <span class="detail-message">${esc(snip)}</span></div>
         <div><strong>Prompt tokens:</strong> <span class="detail-tokens">${fmt(w.prompt_tokens)}</span> <span class="muted small">(${w.small ? "small" : "big"})</span></div>
@@ -604,6 +635,10 @@ function updateQueueRow(row, w) {
   const sessionName = w.session_name || snip;
   const sessionShown = sessionName.length > 60 ? sessionName.slice(0, 60) + "..." : sessionName;
   const focused = w.id === $("queue-card")?.querySelector(":scope > div.queue-expanded")?.dataset?.focusedId;
+  const agent = w.agent ? `<span class="muted small" title="Agent: ${esc(w.agent)}">· ${esc(w.agent)}</span>` : "";
+  const root = w.root_session && w.root_session !== w.session_id
+    ? `<span class="muted small" title="Root session: ${esc(w.root_session)}">[${esc(w.root_session.slice(0, 8))}]</span>`
+    : "";
 
   const cells = row.mainRow.querySelectorAll("td");
   // Cell 0: grip (expand trigger)
@@ -620,28 +655,62 @@ function updateQueueRow(row, w) {
     badge.className = `st-badge ${cls}`;
     badge.textContent = text;
   }
-  // Cell 4: session name
+  // Cell 4: session name (with root and agent)
   cells[4].title = sessionName;
-  cells[4].textContent = sessionShown;
+  cells[4].innerHTML = `${esc(sessionShown)}${root}${agent}`;
   // Cell 5: endpoint
   cells[5].textContent = w.path.replace(/^\/v1/, "");
   cells[5].className = "muted small";
-  // Cell 6: focus button
-  const btn = cells[6].querySelector("button");
-  if (btn) {
-    btn.dataset.queueFocus = focused ? "" : w.id;
-    btn.title = focused ? "Unfocus" : "Focus";
-    btn.innerHTML = focused ? icon("lock-fill") : icon("lock");
+  // Cell 6: pause button and focus button
+  const pauseBtn = cells[6].querySelector(".queue-pause-btn");
+  if (pauseBtn) {
+    const isPaused = w.paused && w.paused.includes(w.id);
+    pauseBtn.dataset.pauseId = isPaused ? "" : w.id;
+    pauseBtn.title = isPaused ? "Unpause" : "Pause";
+    pauseBtn.innerHTML = isPaused ? icon("play") : icon("pause");
+  }
+  const focusBtn = cells[6].querySelector("button[data-queue-focus]");
+  if (focusBtn) {
+    focusBtn.dataset.queueFocus = focused ? "" : w.id;
+    focusBtn.title = focused ? "Unfocus" : "Focus";
+    focusBtn.innerHTML = focused ? icon("lock-fill") : icon("lock");
   }
 
   // Update detail row if visible
   const detailRow = row.detailRow;
   if (detailRow && !detailRow.hidden) {
-    detailRow.querySelector(".detail-session").textContent = sessionName;
-    detailRow.querySelector(".detail-message").textContent = snip;
-    detailRow.querySelector(".detail-tokens").innerHTML = `${fmt(w.prompt_tokens)} <span class="muted small">(${w.small ? "small" : "big"})</span>`;
-    detailRow.querySelector(".detail-path").textContent = w.path.replace(/^\/v1/, "");
-    detailRow.querySelector(".detail-wait").textContent = `${w.waited_s.toFixed(1)} s`;
+    const detail = detailRow.querySelector(".queue-expanded-detail");
+    if (detail) {
+      let sessionIdEl = detail.querySelector(".detail-session-id");
+      if (!sessionIdEl) {
+        sessionIdEl = document.createElement("div");
+        sessionIdEl.innerHTML = `<strong>Session ID:</strong> <span class="detail-session-id"></span>`;
+        detail.prepend(sessionIdEl);
+      }
+      sessionIdEl.querySelector(".detail-session-id").textContent = w.session_id || w.id;
+
+      let rootEl = detail.querySelector(".detail-root");
+      if (!rootEl) {
+        rootEl = document.createElement("div");
+        rootEl.innerHTML = `<strong>Root session:</strong> <span class="detail-root"></span>`;
+        detail.prepend(rootEl);
+      }
+      rootEl.querySelector(".detail-root").textContent = w.root_session || w.session_id || "";
+
+      let agentEl = detail.querySelector(".detail-agent");
+      if (!agentEl) {
+        agentEl = document.createElement("div");
+        agentEl.innerHTML = `<strong>Agent:</strong> <span class="detail-agent"></span>`;
+        detail.prepend(agentEl);
+      }
+      agentEl.querySelector(".detail-agent").textContent = w.agent || "—";
+
+      detail.querySelector(".detail-session").textContent = sessionName;
+      detail.querySelector(".detail-message").textContent = snip;
+      detail.querySelector(".detail-tokens").innerHTML = `${fmt(w.prompt_tokens)} <span class="muted small">(${w.small ? "small" : "big"})</span>`;
+      detail.querySelector(".detail-path").textContent = w.path.replace(/^\/v1/, "");
+      detail.querySelector(".detail-wait").textContent = `${w.waited_s.toFixed(1)} s`;
+    }
   }
 }
 
@@ -680,6 +749,16 @@ $("queue-rows").addEventListener("click", async (e) => {
     return;
   }
 
+  // Handle pause/unpause button
+  const pauseBtn = e.target.closest("button.queue-pause-btn");
+  if (pauseBtn) {
+    const id = pauseBtn.dataset.pauseId || undefined;
+    const url = id ? "api/queue/pause-request" : "api/queue/unpause-request";
+    const r = await fetch(url, {method: "POST", headers: headers(true), body: JSON.stringify(id ? {id} : {})});
+    if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
+    return;
+  }
+
   // Handle focus/unfocus button
   const btn = e.target.closest("button[data-queue-focus]");
   if (!btn) return;
@@ -687,6 +766,52 @@ $("queue-rows").addEventListener("click", async (e) => {
   const r = await fetch(id ? "api/queue/focus" : "api/queue/unfocus",
                         {method: "POST", headers: headers(true), body: JSON.stringify(id ? {id} : {})});
   if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
+});
+
+// Drag-and-drop for manual queue reordering (dragId already declared at line 483)
+$("queue-rows").addEventListener("dragstart", (e) => {
+  const row = e.target.closest("tr[data-id].queue-row");
+  if (!row) return;
+  dragId = row.dataset.id;
+  row.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", dragId);
+});
+$("queue-rows").addEventListener("dragend", (e) => {
+  const row = e.target.closest("tr[data-id].queue-row");
+  if (row) row.classList.remove("dragging");
+  dragId = null;
+});
+$("queue-rows").addEventListener("dragover", (e) => {
+  const row = e.target.closest("tr[data-id].queue-row");
+  if (!row) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  const prev = $("queue-rows").querySelector("tr[data-id].queue-row.drag-over");
+  if (prev) prev.classList.remove("drag-over");
+  row.classList.add("drag-over");
+});
+$("queue-rows").addEventListener("dragleave", (e) => {
+  const row = e.target.closest("tr[data-id].queue-row");
+  if (row) row.classList.remove("drag-over");
+});
+$("queue-rows").addEventListener("drop", async (e) => {
+  const targetRow = e.target.closest("tr[data-id].queue-row");
+  if (!targetRow || !dragId || dragId === targetRow.dataset.id) return;
+  e.preventDefault();
+  targetRow.classList.remove("drag-over");
+  // Get the current order from the DOM, find positions, swap
+  const allRows = [...$("queue-rows").querySelectorAll("tr[data-id].queue-row")];
+  const dragIdx = allRows.findIndex(r => r.dataset.id === dragId);
+  const targetIdx = allRows.findIndex(r => r.dataset.id === targetRow.dataset.id);
+  if (dragIdx === -1 || targetIdx === -1) return;
+  // Reorder the DOM elements
+  const [dragEl] = allRows.splice(dragIdx, 1);
+  allRows.splice(targetIdx, 0, dragEl);
+  allRows.forEach(r => $("queue-rows").appendChild(r));
+  // Send new order to server
+  const newOrder = allRows.map(r => r.dataset.id);
+  await reorderQueue(newOrder);
 });
 $("queue-play").addEventListener("click", async () => {
   const r = await fetch("api/queue/play", {method: "POST", headers: headers(true), body: "{}"});
