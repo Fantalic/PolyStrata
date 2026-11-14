@@ -1,6 +1,6 @@
 <h1 align="center">PolyStrata</h1>
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **Deutsch** · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **Deutsch** · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Türkçe](README.tr.md)
 
 <p align="center"><b>Große KI-Modelle auf deinem eigenen PC</b><br>
 Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V und Kolibri 1 · kostenlos und Open Source</p>
@@ -16,6 +16,9 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Cl
 
 PolyStrata lässt große KI-Modelle auf einem normalen PC laufen, Modelle, die sonst meist einen Server brauchen.
 Sie chatten, schreiben Code und arbeiten mit deinen Apps und Coding-Agents zusammen. Nichts verlässt deinen PC.
+
+[Linger](https://github.com/simplexai-labs/linger) ist ein persönlicher Open-Source-Agent, der lokal auf deinem Computer läuft.
+Seine lokalen Modelle laufen auf PolyStrata.
 
 Es lässt zwölf Modelle laufen, auf zwei Engines:
 
@@ -52,6 +55,7 @@ einer 32-GB-Karte gelaufen, die acht kleineren außerdem auf einem Laptop mit ei
 Der Server kann im laufenden Betrieb zwischen installierten Modellen wechseln
 ([wie](docs/BACKENDS.md#changing-the-model), englisch).
 
+PolyStrata wurde von [VecSzn](https://github.com/VecSzn) erstellt.
 PolyStrata baut auf [Strata](https://github.com/Niko1221/Strata) von Niko1221 auf.
 Warum das ein eigenes Repo ist, AMD- und kleinere Karten, Fine-Tunes und andere Fragen: [FAQ](docs/FAQ.md) (englisch).
 
@@ -92,6 +96,61 @@ Was andere auf ihren eigenen Karten gemessen haben und wie du auf deinem PC mit 
 Auf dem Laptop las PolyStrata Prompts 2.7- bis 3.5-mal so schnell wie llama.cpp b11540 und schrieb 1.5- bis
 1.8-mal so schnell, mit Qwen3.6 und mit Tiel Coder ([die beiden Läufe](docs/COMMUNITY_BENCHMARKS.md#comparing-with-llamacpp), englisch).
 
+## Wie viel RAM es belegt
+
+Seit 0.1.45-poly.7 belegt die Engine der elf Modelle weniger RAM: Sie hält die Teile der Modelldatei, die schon auf
+der Grafikkarte liegen, nicht mehr im Speicher. Auf dem Laptop belegte Qwen3.6-35B-A3B nach einem Prompt von 32,000
+Tokens mit 0.1.45-poly.6 17.9 GiB, jetzt 13.1 GiB, und es schreibt genauso schnell. Unter Linux ging es von 17.8 auf
+12.6 GiB.
+
+Um weniger zu belegen, füge `"--ram-experts-mib", "6144"` zur `"args"`-Liste von `strata-<model>.json` hinzu
+([wo](docs/INSTALL.md#where-things-are-stored)) und starte neu. Die Engine hält dann so viele MiB RAM für die Experten
+außerhalb des VRAM, auch während sie antwortet, und sagt das beim Start. Die übrigen bleiben im Dateicache des
+Systems, wo andere Programme den Speicher nutzen können, und werden von dort gelesen, wenn ein Token sie braucht.
+Passen die Experten in den freien RAM, ist das standardmäßig aus, weil es langsamer schreibt; wir arbeiten weiter
+daran. Passen sie nicht hinein, schaltet die Engine es selbst ein (siehe unten). Auf dem Laptop (RTX 4070 Laptop
+8 GB, 32 GB RAM, Windows 11), Qwen3.6-35B-A3B UD-Q3_K_M:
+
+| | Standard | `--ram-experts-mib 6144` |
+| --- | ---: | ---: |
+| RAM der Engine nach dem Laden | 11.7 GiB | **6.5 GiB** |
+| höchstens beim Schreiben: kurzer Chat / nach einem 32K-Prompt | 14.3 / 14.0 GiB | **6.7 / 7.3 GiB** |
+| zwischen Anfragen | 12.8 GiB | **7.1 GiB** |
+| Schreibt, Token/s: der erste kurze Chat | 71.6 | 69.4 (3 % langsamer) |
+| nach dem 32K-Prompt | 65.4 | 63.7 (3 % langsamer) |
+| ein kurzer Chat danach | 84.2 | 72.9 (13 % langsamer) |
+| eine lange Antwort (1,024 Token eines kurzen Chats) | 90.6 | 78.3 (14 % langsamer) |
+
+Bei dieser Messung belegten andere Programme einen Teil des VRAM, darum schreiben beide Spalten langsamer als mit
+freier Karte. In zwei anderen Läufen schrieb es nach dem 32K-Prompt 6 bis 8 % langsamer und im Chat danach 8 bis
+10 %. Unter Linux (eine RTX PRO 6000, auf etwa 8 GB begrenzt) belegte es 7.0 bis 7.7 GiB statt 12.3 bis 14.3 und
+schrieb 7 bis 14 % langsamer. Mit festgehaltenem Experten-Cache, wie ein Release geprüft wird, sind die Antworten
+Token für Token gleich.
+
+Passen die Experten außerhalb des VRAM nicht in den freien RAM, hält die Engine jetzt die meistgenutzten in einem
+Budget aus diesem RAM minus 4 GiB und liest die übrigen von der SSD, wenn ein Token sie braucht; das sagt sie beim
+Start. Vorher bildete sie alle ab, und das System las sie Seitenfehler für Seitenfehler zurück. Das Speicherlimit
+eines Containers zählt mit. Gemessen unter Linux auf einer RTX PRO 6000, auf etwa 8 GB begrenzt, mit der Engine auf
+12 GB und auf 10 GB RAM begrenzt (was ihr auf einem PC mit 16 GB bleibt) und der Modelldatei bei jedem Start
+außerhalb des Dateicaches: Qwen3.6-35B-A3B UD-Q3_K_M, Token/s im ersten kurzen Chat, nach einem 24,000-Token-Prompt
+und in einem kurzen Chat danach.
+
+| RAM für die Engine | alle Experten abgebildet (vorher) | das Budget, das sie jetzt nimmt |
+| --- | ---: | ---: |
+| 12 GB | 51 / 75-78 / 94-98 | **57-60 / 77-85 / 131-139** |
+| 10 GB | 39 / 48 / 69 | **51 / 64 / 92** |
+
+Ohne Limit schreibt dieselbe Maschine 63 / 169 / 203. Unter Windows, wo derselbe Code läuft, wurde es nicht
+gemessen. `"--ram-experts-mib", "-1"` bildet wie bisher alle Experten ab.
+
+Umgekehrt sperrt `"--lock-experts"` die Experten außerhalb des VRAM im RAM, sodass das System ihren Speicher nicht an
+andere Programme gibt und die Engine sie später nicht wieder von der SSD liest. Unter Linux sperrt es höchstens, was
+`ulimit -l` erlaubt, und die Engine sagt beim Start, wie viel es war.
+
+Zum Lesen von Prompts braucht die Engine außerdem 350 bis 400 MiB weniger VRAM: Der Expertencache nimmt sie (Qwen3.6
+hält 2,712 statt 2,444 Experten im VRAM), oder `--vram-reserve-mib` lässt sie anderen Programmen. Wie es funktioniert
+und gemessen wurde: [docs/BACKENDS.md](docs/BACKENDS.md#less-of-the-pcs-ram-and-vram).
+
 ## Was du brauchst
 
 | Modell | Grafikkarte | RAM (Größe des Installers) | Festplatte | System |
@@ -99,9 +158,9 @@ Auf dem Laptop las PolyStrata Prompts 2.7- bis 3.5-mal so schnell wie llama.cpp 
 | [Qwen3.8-Flash-Next](docs/models/qwen38.de.md) | NVIDIA RTX 20 bis 50, oder AMD RX 6800 / 6900, RX 7700 XT / 7800 XT / 7900 XT / XTX, RX 9060 XT / 9070 / 9070 XT, Radeon AI PRO R9700; ab 12 GB | ab 32 GB; mit 64 GB laufen alle Größen | etwa 80 GB | Windows, Linux |
 | [GLM 5.3 Flash](docs/models/glm.de.md) | NVIDIA RTX 20 oder neuer; nur auf einer 32-GB-Karte gelaufen | 96 GB neben einer 32-GB-Karte | 79 bis 114 GB, auf einer SSD | Linux |
 | [DeepSeek V4 Flash](docs/models/deepseek.de.md) | wie oben | 72 GB neben einer 32-GB-Karte | 91 GB, auf einer SSD | Linux |
-| [LFM2.5-24B-A2B](docs/models/lfm25.de.md) | NVIDIA RTX 20 oder neuer, ab 8 GB | etwa 20 GB neben einer 8-GB-Karte | 11 bis 25 GB | Windows, Linux |
+| [LFM2.5-24B-A2B](docs/models/lfm25.de.md) | NVIDIA RTX 20 oder neuer, ab 8 GB | etwa 20 GB neben einer 8-GB-Karte | 11 bis 25 GB | Windows, Linux, Mac (Beta) |
 | [Flint 40B-A2.5B](docs/models/flint.de.md) | wie oben | etwa 22 GB neben einer 8-GB-Karte | 18 bis 42 GB | Windows, Linux |
-| [Qwen3.6-35B-A3B](docs/models/qwen36.de.md) | wie oben; AMD als Beta | etwa 21 GB neben einer 8-GB-Karte | 13 bis 23 GB | Windows, Linux |
+| [Qwen3.6-35B-A3B](docs/models/qwen36.de.md) | wie oben; AMD als Beta | etwa 21 GB neben einer 8-GB-Karte | 13 bis 23 GB | Windows, Linux, Mac (Beta) |
 | [Clover-35B-A3B-Preview](docs/models/clover.de.md) | NVIDIA RTX 20 oder neuer, 8 GB oder mehr | etwa 20 GB neben einer 8-GB-Karte | 13 bis 21 GB | Windows, Linux |
 | [Ornith 1.5](docs/models/ornith.de.md) | wie oben; AMD als Beta | etwa 22 GB neben einer 8-GB-Karte | 14 bis 24 GB | Windows, Linux |
 | [Gemma 4 26B-A4B](docs/models/gemma4.de.md) | wie oben; AMD als Beta | etwa 18 GB neben einer 8-GB-Karte | 11 bis 17 GB | Windows, Linux |
@@ -109,7 +168,7 @@ Auf dem Laptop las PolyStrata Prompts 2.7- bis 3.5-mal so schnell wie llama.cpp 
 | [MiniCPM-V 4.7 35B-A3B](docs/models/minicpmv.de.md) | wie oben; AMD als Beta | etwa 25 GB neben einer 8-GB-Karte | 16 bis 29 GB | Windows, Linux |
 | [Kolibri 1](docs/models/kolibri.de.md) | NVIDIA RTX 20 oder neuer, ab 8 GB | etwa 33 GB neben einer 8-GB-Karte | 29 bis 48 GB | Windows, Linux |
 
-Der RAM ist die Schätzung des Installers; eine größere Karte braucht weniger. Alles andere richtet der Installer ein: Unter Windows lädt er die Engine fertig gebaut herunter und kompiliert sie nur auf einem Prozessor ohne AVX2 oder wenn die Engine deiner Kopie neuer als das letzte Release ist; fehlende Werkzeuge bietet er an. Zwei oder drei Karten können sich ein Modell teilen ([Multi-GPU](docs/MULTI_GPU.md)). Ältere Grafikkarten, Intel Arc, Strix Halo und ältere Prozessoren ohne AVX2: [die ganze Liste](docs/INSTALL.md#what-you-need). Karte, RAM und Größen jedes Modells im Detail stehen auf seiner Seite.
+Der RAM ist die Schätzung des Installers; eine größere Karte braucht weniger. Alles andere richtet der Installer ein: Unter Windows lädt er die Engine fertig gebaut herunter und kompiliert sie nur auf einem Prozessor ohne AVX2 oder wenn die Engine deiner Kopie neuer als das letzte Release ist; fehlende Werkzeuge bietet er an. Zwei oder drei Karten können sich ein Modell teilen ([Multi-GPU](docs/MULTI_GPU.md)). Ältere Grafikkarten, Intel Arc, Apple-Silicon-Macs (Qwen3.8-Flash-Next, als Beta auch Qwen3.6 und LFM2.5), Strix Halo und ältere Prozessoren ohne AVX2: [die ganze Liste](docs/INSTALL.md#what-you-need). Karte, RAM und Größen jedes Modells im Detail stehen auf seiner Seite.
 
 Was Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder und MiniCPM-V jeweils brauchen und wie es geprüft wurde: [docs/BACKENDS.md](docs/BACKENDS.md#install) (englisch).
 
@@ -120,7 +179,7 @@ Was Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder und MiniCPM-V jeweils brauc
 Nutzt du einen KI-Coding-Assistenten (Claude Code, Cursor, Codex, GitHub Copilot, ...)? Füge dort diesen Text ein:
 
 ```text
-Set up PolyStrata on this PC for me: https://github.com/VecSzn/PolyStrata - follow docs/AI_SETUP.md in that repository.
+Set up PolyStrata on this PC for me: https://github.com/simplexai-labs/PolyStrata - follow docs/AI_SETUP.md in that repository.
 ```
 
 Er prüft deine Grafikkarte, deinen RAM und deine Festplatte und wählt das passende Modell. Dann installiert und
@@ -129,10 +188,10 @@ startet er es und sagt dir, wie du deine Apps verbindest. KI-Tools können PolyS
 
 ### Oder mach es selbst
 
-[Lade PolyStrata herunter](https://github.com/VecSzn/PolyStrata/archive/refs/heads/main.zip) und entpacke es (oder nutze
+[Lade PolyStrata herunter](https://github.com/simplexai-labs/PolyStrata/archive/refs/heads/main.zip) und entpacke es (oder nutze
 `git clone`). **Windows:** Doppelklick auf **`START-HERE.bat`**. **Linux:** Führe im PolyStrata-Ordner **`./setup.sh`** aus.
 
-**Mac (Apple Silicon, M1 bis M5, macOS 15 oder neuer):** Installiere einmal Apples Command Line Tools (`xcode-select --install` im Terminal; Xcode selbst brauchst du nicht). Öffne dann das Terminal im PolyStrata-Ordner und führe **`./setup.sh`** aus. Es baut die Mac-Engine auf deinem Mac (etwa 7 Minuten), stellt dieselben Fragen, lädt das Modell und startet es. Beim nächsten Mal startet `./setup.sh` sofort. Welche Größe zu deinem Mac passt und wie schnell es ist: [docs/MAC.md](docs/MAC.md). Die Mac-Engine läuft nur mit Qwen3.8-Flash-Next; die anderen elf Modelle brauchen eine NVIDIA- oder AMD-Karte.
+**Mac (Apple Silicon, M1 bis M5, macOS 15 oder neuer):** Installiere einmal Apples Command Line Tools (`xcode-select --install` im Terminal; Xcode selbst brauchst du nicht). Öffne dann das Terminal im PolyStrata-Ordner und führe **`./setup.sh`** aus. Es baut die Mac-Engine auf deinem Mac (etwa 7 Minuten), stellt dieselben Fragen, lädt das Modell und startet es. Beim nächsten Mal startet `./setup.sh` sofort. Welche Größe zu deinem Mac passt und wie schnell es ist: [docs/MAC.md](docs/MAC.md). Standardmäßig richtet es Qwen3.8-Flash-Next ein. `./setup.sh --family qwen36` oder `--family lfm25` richtet stattdessen Qwen3.6 oder LFM2.5 auf der Metal-Engine von strata-poly ein, als Beta: Auf einem M5 Ultra schrieb Qwen3.6 UD-Q2_K_XL in einem kurzen Chat 134 Tokens/s und las einen Prompt mit 3,768 Tokens mit 2,978 Tokens/s. Setup bietet auf dem Mac auch GLM, DeepSeek, Ornith, Gemma 4, Tiel Coder und MiniCPM-V an, aber die liefen dort noch nicht mit ihren echten Gewichten. Kolibri, Flint und Clover brauchen eine NVIDIA- oder AMD-Karte.
 
 Die Schritte sind für NVIDIA und AMD gleich. Der Installer erkennt deine Karte und richtet die passende Engine
 dafür ein. Er stellt dir ein paar Fragen:
@@ -240,7 +299,7 @@ Starte PolyStrata danach neu (`START-HERE.bat` oder `./setup.sh`). Zum Rückgän
 - **Es meldet, dass Port 8080 schon belegt ist.** PolyStrata läuft bereits. Such nach seinem Fenster.
 
 Weitere Probleme und ihre Lösungen: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Kommst du nicht weiter?
-Öffne ein [Issue](https://github.com/VecSzn/PolyStrata/issues) und hänge `strata-<model>.log` aus dem PolyStrata-Ordner
+Öffne ein [Issue](https://github.com/simplexai-labs/PolyStrata/issues) und hänge `strata-<model>.log` aus dem PolyStrata-Ordner
 an. Du hast ein Sicherheitsproblem gefunden? Melde es vertraulich: [SECURITY.md](SECURITY.md).
 
 ## Wie funktioniert es?

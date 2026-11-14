@@ -16,6 +16,7 @@ a second machine, a Windows laptop whose card has 8 GB.
 | GLM 5.3 Flash | `glm5-next` | `strata-poly` | GSQ-RCO 3.0bit, REAP50-Q3_K_M, UD-IQ2_XXS | draft block |
 | Qwen3.6-35B-A3B | `qwen35moe` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 12.6 to 22.7 GB | draft block in the file |
 | Ornith 1.5 35B-A3B | `qwen35moe` | `strata-poly` | APEX-MTP-I-Compact, I-Mini and I-Quality, 14.4 to 23.7 GB | draft block in the file |
+| Ornith 1.5 122B | `qwen35moe` | `strata-poly` | Unsloth UD-Q3_K_XL, UD-Q2_K_XL, UD-IQ3_XXS, UD-Q4_K_XL and Q8_0, 44.5 to 132.6 GB | draft block in the file |
 | Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 10.5 to 16.9 GB | its draft model, a file of 0.46 GB |
 | Tiel Coder 35B-A3B | `qwen35moe` | `strata-poly` | peculiar-ragdoll's UD-Q3_K_XL, UD-IQ3_XXS and UD-Q4_K_XL, 13.6 to 22.7 GB | draft block in the file |
 | MiniCPM-V 4.7 35B-A3B | `qwen35moe` | `strata-poly` | OpenBMB Q4_K_M, mix_q3gud_im and Q6_K, 15.5 to 28.5 GB | none: it answers one token at a time |
@@ -35,8 +36,8 @@ The optional CUDA [GDN prefill adapter](DETAILS.md#strata-poly-chunked-gdn-prefi
 ## Install
 
 Setup installs all of them. They are in its list of models, and each has a family name that goes
-straight to it. GLM 5.3 Flash and DeepSeek V4 Flash, the two large ones, have pages of their own,
-[GLM.md](GLM.md) and [DEEPSEEK.md](DEEPSEEK.md):
+straight to it. The larger models have pages of their own,
+[GLM.md](GLM.md), [DEEPSEEK.md](DEEPSEEK.md) and [ORNITH.md](ORNITH.md):
 
 ```bash
 ./setup.sh --family qwen36
@@ -44,6 +45,10 @@ straight to it. GLM 5.3 Flash and DeepSeek V4 Flash, the two large ones, have pa
 
 ```bash
 ./setup.sh --family ornith
+```
+
+```bash
+./setup.sh --family ornith122
 ```
 
 ```bash
@@ -74,6 +79,11 @@ straight to it. GLM 5.3 Flash and DeepSeek V4 Flash, the two large ones, have pa
 | `ornith` | Ornith 1.5 35B-A3B | APEX-MTP-I-Compact | 17.4 GB | about 22 GB |
 | | | APEX-MTP-I-Mini | 14.4 GB | about 18 GB |
 | | | APEX-MTP-I-Quality | 23.7 GB | about 28 GB |
+| `ornith122` | Ornith 1.5 122B | Unsloth UD-Q3_K_XL, three files | 59.8 GB | about 47 GB (needs a 16 GB+ card, ~47 GB beside 24 GB) |
+| | | Unsloth UD-Q2_K_XL | 44.5 GB | about 32 GB beside a 24 GB card |
+| | | Unsloth UD-IQ3_XXS | 49.5 GB | about 37 GB beside a 24 GB card |
+| | | Unsloth UD-Q4_K_XL, three files | 79.7 GB | about 66 GB beside a 24 GB card |
+| | | Unsloth Q8_0, four files | 132.6 GB | about 119 GB beside a 24 GB card |
 | `gemma4` | Gemma 4 26B-A4B | Unsloth UD-Q3_K_M and its draft model | 13.2 GB | about 18 GB |
 | | | Unsloth UD-Q2_K_XL and the draft model | 11.0 GB | about 15 GB |
 | | | Unsloth UD-Q4_K_M and the draft model | 17.4 GB | about 21 GB |
@@ -1994,6 +2004,203 @@ In a Claude Code session, turns of about 188 tokens had looked slower with `--st
 the laptop, with Qwen3.6 UD-Q3_K_M as setup runs it, six turns of 188 tokens behind 16,000 took 418 to 489 ms each
 with either value, two rounds of each in turn. The new prompts of 300, 500 and 800 tokens after them took 499 to
 844 ms with 1,024 and 1,276 to 1,432 with 256, where their calls copy ahead and the CPU takes no share.
+
+### CPU left to other programs
+
+The engine took a thread for every usable CPU. A thread without a task spins a millisecond before it sleeps,
+and the tasks of a token come closer together than that, so while an answer was written the CPU was all but full.
+The engine now takes 70% of the CPUs, rounded, unless `--threads` names a count. A container with a CPU quota
+(`/sys/fs/cgroup/cpu.max`, as a rented cloud machine has) keeps every CPU: it has no desktop to leave CPU to, and
+that is where GLM 5.3 Flash and DeepSeek V4 Flash run, whose CPU experts are most of a token (on the RTX 5090
+machine on 2026-10-12, GLM's took 15 ms a token with 18 threads where 12.8 with 24). A server with no quota is
+taken for a PC: give it `--threads` with its CPU count for those two models. On a hybrid CPU setup writes a count
+of its own, as before.
+
+It was measured with a test script kept outside the repository: Qwen3.6 UD-Q3_K_M, the engine of
+0.1.45-poly.7 alone, the README's short chat, a prompt of about 24,000 tokens and the short chat again, 256 tokens
+each, three rounds and the medians of the last two. Under Linux on 16 cores and 32 threads of a node of the RTX
+PRO 6000's Xeon (`taskset`), the card held to 8 GB, with others' work on 10 to 15% of each core; tokens/s
+written, and the share of the 32 CPUs busy while it wrote:
+
+| Threads | Short chat | After the prompt | Short chat again | CPU busy | Alongside a load on 8 CPUs |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 32, as before | 177.9 | 178.3 | 211.5 | 90 to 94% | 146.0, 136.6, 155.3; the load at 60 to 63 of its 95 alone |
+| 22, the new default | 185.0 | 177.1 | 209.6 | 66 to 67% | 173.8, 165.0, 191.2; the load at 62 to 65 |
+| 16 | 186.5 | 170.2 | 210.5 | 49 to 50% | 173.9, 152.8, 184.9; the load at 65 to 68 |
+
+The columns beside the load are one session's, the others another's. A thread that has to share its CPU with
+another program is the slowest of a layer's, and the layer waits for it, which is why fewer threads write faster
+beside a load. A thread of the test that slept 5 ms woke 3.1 to 3.5 ms late at the 99th percentile with 32
+threads, and 0.1 ms late with 22 or 16. On the laptop (RTX 4070 Laptop, i7-14700HX, Windows), where setup writes
+13 threads, the CPU was 41 to 45% busy while it wrote; 10 threads made it 33 to 37% at the same speed within the
+runs' noise, and 8 threads 28 to 31% at 0% to 4% slower.
+
+Three other ways were measured and are not taken. Keeping more VRAM free costs experts in VRAM: 1,024 MiB
+(the default leaves 256) wrote 6 to 7% slower under Linux, and as fast on the laptop, whose cache gave up 387
+of its 2,712 experts; 2,048 MiB wrote 11 to 17% slower under Linux and 3 to 6% slower on the laptop. A lower
+priority (`nice 10`, Windows' below normal) wrote as fast alone, and a load beside it ran about as fast as beside
+the normal priority (64 to 66 against 61 to 65 under Linux), most likely because what the two share is a core's
+two threads and the memory, which a priority does not divide. A
+CPU set of 22 CPUs (20 on the laptop) wrote 4% to 9% slower than the same count of threads free to move. The
+Windows runs with every CPU taken by a load did not run: the laptop's RAM was in use.
+
+### Less of the PC's RAM and VRAM
+
+On the laptop (RTX 4070 Laptop 8 GB, 32 GB of RAM), Qwen3.6 UD-Q3_K_M held the whole of its 15.9 GiB file in its
+working set after the benchmark's 32K prompt: 17.9 GiB with 1.4 GiB of pinned memory. The dense weights and the
+experts the card has were read through the mapping on their way to VRAM, and their pages stayed. Now:
+
+- The dense weights' pages leave the working set once they are on the card. Between requests the experts the card
+  has leave it too, the half used most lately: the CPU reads one of them only after an answer moves it out of the
+  cache, and an answer moves the least used ones out. With every cached expert's pages dropped, LFM2.5's first short
+  chat moved 624 of its 838 cached experts out and wrote at 70 tokens/s where 80. The file cache keeps the pages,
+  which the system counts as available and gives to whatever needs memory.
+- Pinned memory 1.18 to 1.43 GiB → 0.17: the two staging chunks are 64 MiB each where 512 (a 32K prompt read as
+  fast), the follower uploads through two buffers where it had one for each of the 64 uploads it may have in
+  flight (515 MiB of LFM2.5's), and a long read's pinned rows are given back between requests. The chunks were
+  allocated before the engine looks at the PC's free RAM for its VRAM reserve, so the line for a tight PC moved
+  from 4 to 5 GiB over the model's files with them: the same PC in the same state keeps the reserve it had.
+- The staging buffer is 128 MiB by default on an NVIDIA card where a read can widen it (one card; ROCm keeps 2
+  GiB, untested there), and a read of several
+  batches widens it to a layer's experts with VRAM the expert cache lends (`--stage-read-mib`, which was off). The
+  cache holds that VRAM while an answer is written: Qwen3.6 2,712 experts where 2,444, Gemma 4 1,166 where 1,013.
+  Prompts of 300 and 1,000 tokens read as fast, of 3,000 to 6,000 up to 2% slower (Qwen3.6 1,388 tokens/s where
+  1,408 at 3,000, 1,587 where 1,623 at 5,000). The experts the cache gave up come back through the follower while
+  the answer is written, not before it (57 ms of Gemma 4's 3,000-token read).
+
+| Qwen3.6 UD-Q3_K_M, 32K prompt | 0.1.45-poly.6 | now | now, `--ram-experts-mib 6144` |
+| --- | --- | --- | --- |
+| Working set, peak | 17.9 GiB | 13.9 | 7.3 |
+| Working set between requests | 17.9 GiB | 13.1 | 7.1 |
+| Experts in VRAM | 2,444 | 2,712 | 2,712 |
+
+The last column is from a later run with the same prompt. Writing, three rounds each, tokens/s, 0.1.45-poly.6 and
+now: Qwen3.6 83.1 and 84.8 after the short prompt, 80.0 and 80.0 after the 32K one; Gemma 4 UD-Q3_K_M 72.0 and
+72.9, 56.2 and 56.1; LFM2.5 UD-Q4_K_XL 89.8 and 92.0, 67.2 and 67.6. On Linux (an RTX PRO 6000 held to about 8 GB)
+Qwen3.6's resident memory went from 17.8 to 12.6 GiB.
+
+With a cache the size 0.1.45-poly.6 gives it (`--stage-mib 2048 --stage-read-mib 0`) the answers are the same
+token for token. Checked as a release is, the experts held still and no guesses, a short prompt and a 3,000-token one,
+96 tokens each: eight models with the flash-attention paths off and the four of the Qwen3.6 family with them on. With
+the defaults the cache holds more experts, the CPU and the card share the work another way and their sums round
+apart: Clover APEX-I-NanoPlus parted after 16 tokens of the short prompt.
+
+`--ram-experts-mib N` holds N MiB of RAM for the routed experts the card does not have, while an answer is written
+as well as between requests; without it every one of them stays in RAM. It is off by default because it writes
+slower, as below. It says so at the start:
+
+    strata-poly: 6144 MiB of RAM for the 10.1 GiB of experts outside VRAM; the others come from the file cache when a token needs them (--ram-experts-mib, -1 for all)
+
+It was measured with 6,144 MiB on files with 6 to 12 GiB of experts outside VRAM, not with more.
+
+Three quarters of the budget are the experts the profile and this run used most, read through the mapping as before:
+their pages are the file cache's, so the RAM holds them once. The last quarter is a pool of slots, each a private
+copy. A call's experts outside both are read into free slots by eight threads, with ReadFile in pieces of 256 KiB,
+and the next layer's eight likeliest experts for each token are read ahead from the router's guess. A slot goes to
+the expert read once before the one read again (two queues). The slots come in one size for each size of expert:
+Qwen3.6 UD-Q3_K_M's are 1.30 MiB in 37 layers and 1.42, 1.59 and 1.88 MiB in the other four, and its 1.5 GiB of
+slots hold 1,163 of them where one size for all held 815.
+
+A larger pool was slower. Its copies are private and the file cache keeps the same pages, so with all 6 GiB as slots
+the system dropped the other experts from the file cache and a run read 7.5 to 11 GiB from the SSD. Read through the
+mapping, an expert takes the RAM once.
+
+What a read of a 1.3 MiB expert in the file cache costs on the laptop: through the mapping 257 µs on one thread and
+86 µs each with eight; with ReadFile 155 and 66 µs. With eight threads a piece of 64 KiB took 89 to 109 µs and one of
+256 KiB 143 to 154, so the cost is mostly per call: 256 KiB pieces wrote 1.5% faster after the 32K prompt and 2.2% in
+the chat after it. PrefetchVirtualMemory did not make pages already in the file cache faster to touch. A read thread
+spins for 2 ms before it sleeps; on the lab's card that and the 256 KiB pieces together wrote 7.6% faster after the
+32K prompt (182.97 tokens/s where 170.08) and as fast in the chat after it. Why the spin helps is not known.
+
+The laptop, the release's engine with and without `--ram-experts-mib 6144`, the two in turn, four rounds, the
+medians of the last three. Other programs held part of the card's VRAM in this run, so both kept 2,357 experts in
+VRAM after the first chat (2,445 in an earlier one):
+
+| Qwen3.6 UD-Q3_K_M | default, every expert in RAM | `--ram-experts-mib 6144` |
+| --- | ---: | ---: |
+| Working set after the load | 11.7 GiB | 6.5 |
+| at most: short chat / after the 32K prompt | 14.3 / 14.0 | 6.7 / 7.3 |
+| between requests | 12.8 | 7.1 |
+| Writing, tokens/s: the first short chat | 71.6 | 69.4 |
+| after the 32K prompt | 65.4 | 63.7 |
+| the short chat after it | 84.2 | 72.9 |
+| 1,024 tokens of a short chat, one run | 90.6 | 78.3 |
+
+Two earlier runs with the same code wrote 5.8% and 7.7% slower after the 32K prompt and 9.6% and 8.4% slower in
+the chat after it. On Linux (the lab's RTX PRO 6000 held to about 8 GB) it held 7.0 to 7.7 GiB where 12.3 to 14.3,
+and wrote 6.7% slower after the 32K prompt and 11.9% in the chat after it (182.97 and 204.65 tokens/s where 196.12
+and 232.18); one run each, 1,024 tokens of a short chat at 196.5 where 227.7 and 512 after the 32K prompt at 180.4
+where 200.6. With the experts held still and no guesses (`--expert-swaps 0 --cpu-share 0 --tail-skip 0 --window 1`)
+the 256 tokens of each of the three answers were the same as with every expert in RAM, on Windows and on Linux.
+
+`--lock-experts`, off by default, goes the other way: the experts outside VRAM are locked in RAM, so the system
+cannot hand their memory to another program. Without it they are pages of the file, which Windows counts in the
+engine's working set and Linux in its page cache, and either takes them back when memory runs short; a token that
+needs one then reads it from the disk again. A user's 16.7 GB file had 3.4 GB of it left in memory under Linux
+([issue 79](https://github.com/VecSzn/PolyStrata/issues/79)). The engine locks them once the load has read them
+in (mlock under Linux, VirtualLock under Windows), and between requests unlocks the ones the cache has taken and
+locks the ones it has given up. Linux locks no more than `ulimit -l` allows; past it the engine says how much it
+locked and the rest stay in the file cache. It does not go with `--ram-experts-mib`.
+
+On the laptop with Qwen3.6 UD-Q3_K_M it locked 10.1 GiB. With Windows emptying the engine's working set from
+outside, as it does when memory runs short, 0.07 GiB of the 14.05 stayed without the lock and 10.13 GiB with it.
+After a 32K prompt the cache gave up 345 experts, and 10.63 GiB stayed. With the cache the same size in both runs
+(`--vram-reserve-mib 2000`), the three answers above were the same with it and without it.
+
+Under Linux, on the lab's RTX PRO 6000 held to about 8.9 GB, it locked 8.8 GiB, which /proc showed as VmLck.
+With `ulimit -l` at 1 GiB it locked 1.0 GiB and said that mlock refused the rest at that limit. A short chat, a
+32K prompt and the short chat again left 8.86, 9.24 and 9.24 GiB locked: the attention caches grew with the long
+prompt, the cache gave up experts for them, and those were locked as well. The answers were the same with and
+without it.
+
+#### When the experts do not fit in RAM
+
+Without `--ram-experts-mib` the engine looks at the RAM that is free once the expert cache is filled. When the
+experts outside VRAM and 4 GiB more do not fit in it, it takes a budget of what is free less 4 GiB, as if
+`--ram-experts-mib` had named it, and says so:
+
+    strata-poly: 11.7 GiB of RAM free for 9.3 GiB of experts outside VRAM: they do not fit, so the ones used most stay in RAM (--ram-experts-mib -1 maps them all)
+
+Otherwise every expert stays mapped, as before, and `-1` keeps them mapped whatever the RAM. Free is what the system
+reports (MemAvailable under Linux, the available physical memory under Windows), and under Linux no more than the
+room under the cgroup memory limits on the way to the root, a group's file pages counted as free: a container sees
+the host's RAM in /proc/meminfo. With `--lock-experts` the engine takes no budget by itself.
+
+Through the mapping, experts that do not fit come back a page fault at a time, each fault a few pages read and
+waited for. Measured on the lab's machine with Qwen3.6 UD-Q3_K_M (a 15.9 GiB file, 9.3 GiB of experts outside the
+card): the card held to about 8 GB, 16 cores and 32 threads of the Xeon's second node, the engine in a systemd scope
+with MemoryMax of 12 or 10 GB and no swap, and the model file dropped from the page cache before every start
+(POSIX_FADV_DONTNEED: a page that another cgroup read in is not charged to the scope, and runs before that found the
+file in memory). Three rounds, the medians of the last two, tokens/s:
+
+| RAM | | First short chat | After 24,000 tokens | Short chat again |
+| --- | --- | ---: | ---: | ---: |
+| 12 GB | every expert mapped | 51.1 | 78.4 | 94.0 |
+| | 6,144 MiB | 56.1 | 86.1 | 115.8 |
+| | 7,168 MiB | 60.0 | 81.0 | 115.8 |
+| | by itself: 7,902 MiB | 59.5 | 84.6 | 138.8 |
+| 10 GB | every expert mapped | 39.1 | 48.2 | 69.2 |
+| | 4,096 MiB | 51.1 | 59.1 | 80.1 |
+| | by itself: 5,855 MiB | 51.1 | 64.1 | 91.7 |
+| no limit | every expert mapped | 63.1 | 168.5 | 202.8 |
+
+In another session, two runs under 12 GB with the build as committed, every expert mapped wrote 50.8, 75.3 and 97.9
+tokens/s and the budget it took 57.0, 77.0 and 130.7: after the long prompt the two are closer there, and that cell
+moves most from session to session. The engine found 11.7 GiB free under the 12 GB limit and 9.7 GiB under 10 GB.
+With the experts held still, the three
+answers under 12 GB were the same token for token with the budget it took and with every expert mapped. The first
+chat is slow in every row: it comes right after the load, with none of the file in memory yet.
+
+Two more were tried and left out. Reading the experts outside the budget past the page cache (O_DIRECT), which the
+lab's NVMe gives 3.41 GB/s with eight threads reading 256 KiB where plain pread gives 2.06 from a cold cache, wrote
+slower with the same budget: 6,144 MiB wrote 58, 79 and 99 tokens/s where it wrote 63, 90 and 114 through the cache,
+since the cache holds what the budget leaves free. A budget that makes up for it has to be just right: 8,192 MiB wrote
+57, 82 and 125, and 9,216 MiB 54, 64 and 116, when the engine's own memory and the mapped part of the budget no longer
+fitted under 12 GB. And reading the file ahead at the load, as Windows does, did not make the first answer after a
+cold start faster under Linux: with madvise(MADV_WILLNEED) over the spans it came at 63.5 tokens/s and with a thread
+of 16 MiB preads at 61.8, where 63.1 without either, with no limit.
+
+Windows decides the same way and was not measured; the budget's reads there are the ReadFile ones measured above.
 
 ### Qwen3.6 on two engines
 
