@@ -51,6 +51,16 @@ def _matches(prefix: list, ids: list) -> bool:
     return len(ids) > len(prefix) and ids[:len(prefix)] == prefix
 
 
+def _continues(prefix: list, bundle: str, e: "Entry") -> bool:
+    """Does the waiting entry `e` continue the served conversation (`prefix`, `bundle`)?
+    With a session bundle (the plugin's headers) the match is by the root session id - a
+    sub-agent's first request shares its main session's bundle without sharing a token prefix.
+    Without bundles, by the engine's token checkpoint."""
+    if bundle and e.bundle:
+        return bundle == e.bundle
+    return _matches(prefix, e.ids)
+
+
 def last_user_snippet(req: dict, chars: int = 100) -> str:
     """The last user message's text on one line, cut to `chars`: the queue view's column that says
     which session a call belongs to.  Works for OpenAI and Anthropic bodies (both use `messages`
@@ -89,11 +99,17 @@ def first_user_snippet(req: dict, chars: int = 60) -> str:
 
 class Entry:
     """One waiting request, as the admission sees it (also what GET /api/queue shows)."""
-    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "ids", "plen", "deferred", "reason", "session_name")
+    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "ids", "plen", "deferred", "reason",
+                 "session_name", "bundle", "session_id", "root_session", "agent")
 
-    def __init__(self, id: str, ids: list, path: str, snippet: str, session_name: str = ""):
+    def __init__(self, id: str, ids: list, path: str, snippet: str, session_name: str = "",
+                 session_id: str = "", root_session: str = "", agent: str = ""):
         self.id, self.ids, self.path, self.snippet = id, ids, path, snippet
         self.session_name = session_name
+        # the session bundle (plugin headers): every request of one root session - the main agent's
+        # session and its sub-agent spawns - shares the root id and counts as one conversation
+        self.session_id, self.root_session, self.agent = session_id, root_session, agent
+        self.bundle = root_session or session_id
         self.arrived, self.arrived_mono = time.time(), time.monotonic()
         self.plen = len(ids)
         self.deferred = False                       # was held back at least once (for the view)
@@ -103,9 +119,9 @@ class Entry:
         return self.plen <= small_toks
 
     def public(self, affinity) -> dict:
-        if affinity.hold and not _matches(affinity.hold["prefix"], self.ids):
+        if affinity.hold and not _continues(affinity.hold["prefix"], affinity.hold["bundle"], self):
             state = "hold"
-        elif affinity.focused and not _matches(affinity.focused["prefix"], self.ids):
+        elif affinity.focused and not _continues(affinity.focused["prefix"], affinity.focused["bundle"], self):
             state = "focus"
         elif self.deferred:
             state = "affinity"
@@ -113,6 +129,7 @@ class Entry:
             state = "queued"
         return {"id": self.id, "path": self.path, "snippet": self.snippet, "arrived": self.arrived,
                 "session_name": self.session_name,
+                "session_id": self.session_id, "root_session": self.root_session, "agent": self.agent,
                 "prompt_tokens": self.plen, "small": self.small(affinity.settings["small_toks"]),
                 "state": state, "waited_s": round(time.monotonic() - self.arrived_mono, 1)}
 
@@ -136,12 +153,14 @@ class Affinity:
         self.paused = False                   # True while paused (for symmetry with running)
 
     # ---- registration -------------------------------------------------
-    def register(self, id: str | None, ids: list, path: str = "", snippet: str = "", session_name: str = "") -> Entry | None:
+    def register(self, id: str | None, ids: list, path: str = "", snippet: str = "", session_name: str = "",
+                 session_id: str = "", root_session: str = "", agent: str = "") -> Entry | None:
         """A request starts waiting for the turn (None for a request without tokens: nothing to
         match, it runs as before)."""
         if not ids:
             return None
-        entry = Entry(id or uuid.uuid4().hex[:12], ids, path or "", snippet or "", session_name=session_name)
+        entry = Entry(id or uuid.uuid4().hex[:12], ids, path or "", snippet or "", session_name=session_name,
+                      session_id=session_id, root_session=root_session, agent=agent)
         with self.lock:
             self.waiting[entry.id] = entry
         return entry
@@ -168,17 +187,19 @@ class Affinity:
                 self.counters["skips"] += 1
                 return True
             if self.focused:                        # rule 4: focus waits without a timeout
-                ok = _matches(self.focused["prefix"], entry.ids)
+                ok = _continues(self.focused["prefix"], self.focused["bundle"], entry)
             else:
-                ok = any(_matches(p, entry.ids) for p in self.recent)   # rule 2: a continuation
+                ok = any(_continues(p["prefix"], p["bundle"], entry)
+                         for p in self.recent)      # rule 2: a continuation
                 if not ok:
                     # another waiting request continues a recent conversation: it goes first
-                    others = any(e.id != entry.id and any(_matches(p, e.ids) for p in self.recent)
+                    others = any(e.id != entry.id and any(_continues(p["prefix"], p["bundle"], e)
+                                                          for p in self.recent)
                                  for e in self.waiting.values())
                     if others:
                         ok = False
                     elif self.hold:                 # rule 3: the hold window
-                        ok = _matches(self.hold["prefix"], entry.ids) \
+                        ok = _continues(self.hold["prefix"], self.hold["bundle"], entry) \
                             or time.monotonic() >= self.hold["until"]
                     else:
                         ok = True                   # nothing defers it: it runs
@@ -200,13 +221,15 @@ class Affinity:
         if not ids or not self.settings["enabled"]:
             return
         prefix = checkpoint(ids, self.turn_id)
+        bundle = entry.bundle if entry is not None else ""
         with self.lock:
-            self.recent.appendleft(prefix)
+            self.recent.appendleft({"prefix": prefix, "bundle": bundle})
             big = len(ids) > self.settings["small_toks"]
-            follower = any(_matches(prefix, e.ids) for e in self.waiting.values() if e is not entry)
+            follower = any(_continues(prefix, bundle, e)
+                           for e in self.waiting.values() if e is not entry)
             if big and not follower and not self.focused:
                 self.hold = {"until": time.monotonic() + self.settings["hold_s"], "prefix": prefix,
-                             "at": time.time()}
+                             "bundle": bundle, "at": time.time()}
                 self.counters["holds"] += 1
             else:
                 self.hold = None                    # a follower (or a small turn): no gap to bridge
@@ -217,8 +240,8 @@ class Affinity:
             entry = self.waiting.get(id)
             if entry is None:
                 raise KeyError(id)
-            self.focused = {"prefix": checkpoint(entry.ids, self.turn_id), "id": entry.id,
-                            "snippet": entry.snippet}
+            self.focused = {"prefix": checkpoint(entry.ids, self.turn_id), "bundle": entry.bundle,
+                            "id": entry.id, "snippet": entry.snippet}
             self.hold = None
             return {"focused": entry.id, "snippet": entry.snippet}
 

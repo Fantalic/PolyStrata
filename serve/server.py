@@ -4205,13 +4205,22 @@ class Service:
             reading = self.status.get("busy") and self.status.get("first_token") is None
         return getattr(self.engine, "prefill_tok_s_mean", None) if reading else 0.0
 
-    def begin_request(self, path, req):
+    def begin_request(self, path, req, headers=None):
         """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then).
         Either way the request's light identity (path, the last user message's start) is stashed for
-        the affinity admission: the queue view shows it while the request waits for its turn."""
+        the affinity admission: the queue view shows it while the request waits for its turn.  The
+        session headers (X-Session-Id / X-Root-Session / X-Agent, set by the client's plugin - HTTP
+        header names are case-insensitive) bind a request to its session bundle: the admission treats
+        every request of one root session - the main agent and its sub-agent spawns - as one
+        conversation, and the queue view shows which agent called."""
+        get = (headers or {}).get
+        session_id = str(get("X-Session-Id") or "").strip()[:120]
+        root_session = str(get("X-Root-Session") or "").strip()[:120]
+        agent = str(get("X-Agent") or "").strip()[:60]
         pending = {"id": uuid.uuid4().hex[:12], "path": path,
                    "snippet": last_user_snippet(req),
-                   "session_name": first_user_snippet(req) or last_user_snippet(req)}
+                   "session_name": first_user_snippet(req) or last_user_snippet(req),
+                   "session_id": session_id, "root_session": root_session, "agent": agent}
         self.request_trace.pending = pending
         if not self.api_monitor:
             return None
@@ -4888,7 +4897,9 @@ class Service:
         if not par:
             pending = getattr(self.request_trace, "pending", None) or {}
             entry = self.affinity.register(pending.get("id"), ids, pending.get("path", ""),
-                                           pending.get("snippet", ""), pending.get("session_name", ""))
+                                           pending.get("snippet", ""), pending.get("session_name", ""),
+                                           pending.get("session_id", ""), pending.get("root_session", ""),
+                                           pending.get("agent", ""))
 
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
         # window (self.status says busy while any runs); one at a time they are self.status / self.rate, as before
@@ -6336,7 +6347,7 @@ def make_handler(svc: Service):
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
-                    self.record = svc.begin_request(path, req)
+                    self.record = svc.begin_request(path, req, self.headers)
                     # #38: the request holds its model to its end (no switch comes between its prompt and its answer);
                     # with switch_on_request a request naming another installed model loads it first.  Its client is
                     # watched from here (#430 #431, #1999), so a client that leaves while it waits gives up its place.

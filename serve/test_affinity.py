@@ -96,6 +96,43 @@ class AffinityRules(unittest.TestCase):
         grown = a.register("a2", conv(1, 2, 3, 4, TURN_ID, 5))
         self.assertTrue(a.decide(grown))            # the turn checkpoint is a prefix of the next turn
 
+    # ---- session bundles (the plugin's headers) ------------------------
+    def test_a_subagent_request_continues_its_main_session_bundle(self):
+        """A sub-agent's first request shares the root session, not a token prefix: it counts as the
+        main conversation's continuation even though its prompt starts fresh."""
+        a = self.affinity(small_toks=0)
+        main = a.register("m1", conv(1, 2), session_id="ses_main", root_session="ses_main")
+        a.served(conv(1, 2), main)                  # the main session's turn ends, the hold arms
+        sub = a.register("s1", conv(70, 71, 72), session_id="ses_sub1", root_session="ses_main")
+        self.assertTrue(a.decide(sub))              # its bundle continues the served one
+        foreign = a.register("b1", conv(80, 81), session_id="ses_other", root_session="ses_other")
+        self.assertFalse(a.decide(foreign))         # a different root waits out the hold
+
+    def test_a_bundle_beats_the_token_checkpoint(self):
+        """With roots on both sides the bundle decides - even when the tokens would match: a
+        different root must not ride in on a shared prompt prefix."""
+        a = self.affinity(small_toks=0)
+        a1 = a.register("a1", conv(1, 2), session_id="ses_a", root_session="ses_a")
+        a.served(conv(1, 2), a1)
+        stranger = a.register("s1", conv(1, 2, 3), session_id="ses_b", root_session="ses_b")
+        self.assertFalse(a.decide(stranger))        # same tokens, different session: waits
+
+    def test_an_untagged_served_conversation_still_matches_by_checkpoint(self):
+        """No headers (an older plugin, no plugin): the token checkpoint is the only identity - the
+        mixed case (tagged waiting request, untagged served conversation) falls back to tokens."""
+        a = self.affinity(small_toks=0)
+        a.served(conv(1, 2))                        # no entry: bundle ""
+        next_turn = a.register("a2", conv(1, 2, 3), session_id="ses_x", root_session="ses_x")
+        self.assertTrue(a.decide(next_turn))        # the tokens still match
+
+    def test_the_view_carries_the_session_fields(self):
+        a = self.affinity(small_toks=0)
+        e = a.register("m1", conv(1, 2), session_id="ses_main", root_session="ses_main", agent="architect")
+        v = a.view()["waiting"][0]
+        self.assertEqual(v["session_id"], "ses_main")
+        self.assertEqual(v["root_session"], "ses_main")
+        self.assertEqual(v["agent"], "architect")
+
     def test_a_small_request_jumps_in_during_a_focus(self):
         a = self.affinity(small_toks=100)
         a1 = a.register("a1", conv(1, 2))
@@ -108,7 +145,7 @@ class AffinityRules(unittest.TestCase):
         for c in (1, 2, 3):
             a.served(conv(c))
         self.assertEqual(len(a.recent), 2)
-        self.assertEqual([list(p)[0] for p in a.recent], [3, 2])   # newest first
+        self.assertEqual([p["prefix"][0] for p in a.recent], [3, 2])   # newest first
 
     def test_settings_validation(self):
         a = self.affinity()
