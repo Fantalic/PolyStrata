@@ -69,12 +69,31 @@ def last_user_snippet(req: dict, chars: int = 100) -> str:
     return ""
 
 
+def first_user_snippet(req: dict, chars: int = 60) -> str:
+    """The first user message's text on one line, cut to `chars`: a session's name for the queue
+    view - a conversation's opening question is stable across its turns, where the last user
+    message changes every turn."""
+    for m in req.get("messages") or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            text = c
+        elif isinstance(c, list):                    # content parts: the text ones joined
+            text = " ".join(p.get("text") for p in c if isinstance(p, dict) and isinstance(p.get("text"), str))
+        else:
+            continue
+        return " ".join(text.split())[:chars]        # collapsed whitespace, one line
+    return ""
+
+
 class Entry:
     """One waiting request, as the admission sees it (also what GET /api/queue shows)."""
-    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "ids", "plen", "deferred", "reason")
+    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "ids", "plen", "deferred", "reason", "session_name")
 
-    def __init__(self, id: str, ids: list, path: str, snippet: str):
+    def __init__(self, id: str, ids: list, path: str, snippet: str, session_name: str = ""):
         self.id, self.ids, self.path, self.snippet = id, ids, path, snippet
+        self.session_name = session_name
         self.arrived, self.arrived_mono = time.time(), time.monotonic()
         self.plen = len(ids)
         self.deferred = False                       # was held back at least once (for the view)
@@ -93,6 +112,7 @@ class Entry:
         else:
             state = "queued"
         return {"id": self.id, "path": self.path, "snippet": self.snippet, "arrived": self.arrived,
+                "session_name": self.session_name,
                 "prompt_tokens": self.plen, "small": self.small(affinity.settings["small_toks"]),
                 "state": state, "waited_s": round(time.monotonic() - self.arrived_mono, 1)}
 
@@ -116,12 +136,12 @@ class Affinity:
         self.paused = False                   # True while paused (for symmetry with running)
 
     # ---- registration -------------------------------------------------
-    def register(self, id: str | None, ids: list, path: str = "", snippet: str = "") -> Entry | None:
+    def register(self, id: str | None, ids: list, path: str = "", snippet: str = "", session_name: str = "") -> Entry | None:
         """A request starts waiting for the turn (None for a request without tokens: nothing to
         match, it runs as before)."""
         if not ids:
             return None
-        entry = Entry(id or uuid.uuid4().hex[:12], ids, path or "", snippet or "")
+        entry = Entry(id or uuid.uuid4().hex[:12], ids, path or "", snippet or "", session_name=session_name)
         with self.lock:
             self.waiting[entry.id] = entry
         return entry
@@ -172,16 +192,18 @@ class Affinity:
                 self.counters["deferred"] += 1
             return ok
 
-    def served(self, ids: list) -> None:
+    def served(self, ids: list, entry: "Entry | None" = None) -> None:
         """The turn is over (the caller still holds the FIFO): remember the conversation, then arm
-        the hold when it was a big turn with no continuation already waiting."""
+        the hold when it was a big turn with no continuation already waiting.  `entry` is the served
+        request's own registration: it is still in `waiting` (the release runs after this) and must
+        not count as its own follower."""
         if not ids or not self.settings["enabled"]:
             return
         prefix = checkpoint(ids, self.turn_id)
         with self.lock:
             self.recent.appendleft(prefix)
             big = len(ids) > self.settings["small_toks"]
-            follower = any(_matches(prefix, e.ids) for e in self.waiting.values())
+            follower = any(_matches(prefix, e.ids) for e in self.waiting.values() if e is not entry)
             if big and not follower and not self.focused:
                 self.hold = {"until": time.monotonic() + self.settings["hold_s"], "prefix": prefix,
                              "at": time.time()}

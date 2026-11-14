@@ -507,9 +507,11 @@ function renderQueue(q) {
   // Collapsed summary text
   const collapsedText = $("queue-collapsed-text");
   if (q.focused) {
-    collapsedText.textContent = `Focused: ${q.focused.snippet || q.focused.id}`;
+    collapsedText.textContent = `Session: ${q.focused.snippet || q.focused.id}`;
   } else if (q.paused) {
     collapsedText.textContent = "Queue is paused";
+  } else if (q.waiting.length) {
+    collapsedText.textContent = `Waiting: ${q.waiting[0].session_name || q.waiting[0].snippet || q.waiting[0].id}`;
   } else {
     collapsedText.textContent = "No active session";
   }
@@ -522,63 +524,125 @@ function renderQueue(q) {
   if (!q.settings.enabled) lines.push("Affinity is off: requests take the turn in arrival order.");
   $("queue-state").textContent = lines.join("  |  ");
   if (!queueExpanded) return;                        // expanded body hidden: stop after summary
+
   const rows = $("queue-rows");
   if (!q.waiting.length) {
-    rows.innerHTML = `<tr><td colspan="6" class="muted">No requests waiting</td></tr>`;
+    // Only clear if there were rows before (diff-based)
+    const existing = rows.querySelectorAll("tr[data-id]");
+    if (existing.length > 0) {
+      rows.innerHTML = `<tr><td colspan="6" class="muted">No requests waiting</td></tr>`;
+    }
     return;
   }
-  rows.innerHTML = q.waiting.map((w) => {
-    const [cls, text] = queueBadge[w.state] || ["", w.state];
-    const t = new Date(w.arrived * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    const snip = w.snippet || w.id;
-    const shown = snip.length > 90 ? snip.slice(0, 90) + "..." : snip;
-    const focused = q.focused && q.focused.id === w.id;
-    return `<tr data-id="${esc(w.id)}" draggable="true"><td class="qgrip">${icon("grip")}</td><td>${esc(t)}</td><td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
-      <td><span class="st-badge ${cls}">${esc(text)}</span></td>
-      <td title="${esc(snip)}">${esc(shown)}</td><td>${esc(w.path.replace(/^\/v1/, ""))}</td>
-      <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}" title="${focused ? "Unfocus" : "Focus"}">${focused ? icon("lock-fill") : icon("lock")}</button></td></tr>`;
-  }).join("");
-  // drag-and-drop delegation on the tbody
-  rows.addEventListener("dragstart", (e) => {
-    const row = e.target.closest("tr[data-id]");
-    if (!row) return;
-    dragId = row.dataset.id;
-    row.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", dragId);
+
+  // Diff-based update: only change what changed
+  const existing = new Map([...rows.querySelectorAll("tr[data-id]")].map(r => [r.dataset.id, r]));
+  const newIds = new Set(q.waiting.map(w => w.id));
+
+  // Remove rows that are no longer waiting
+  existing.forEach((row, id) => {
+    if (!newIds.has(id)) row.remove();
   });
-  rows.addEventListener("dragend", (e) => {
-    const row = e.target.closest("tr[data-id]");
-    if (row) row.classList.remove("dragging");
-    dragId = null;
-  });
-  rows.addEventListener("dragover", (e) => {
-    const row = e.target.closest("tr[data-id]");
-    if (!row) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    const prev = rows.querySelector("tr[data-id].drag-over");
-    if (prev) prev.classList.remove("drag-over");
-    row.classList.add("drag-over");
-  });
-  rows.addEventListener("dragleave", (e) => {
-    const row = e.target.closest("tr[data-id]");
-    if (row) row.classList.remove("drag-over");
-  });
-  rows.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    const target = e.target.closest("tr[data-id]");
-    if (!target) return;
-    rows.querySelectorAll("tr[data-id].drag-over").forEach(r => r.classList.remove("drag-over"));
-    rows.querySelectorAll("tr[data-id].dragging").forEach(r => r.classList.remove("dragging"));
-    const draggedId = e.dataTransfer.getData("text/plain");
-    if (!draggedId) return;
-    const newOrder = [...rows.querySelectorAll("tr[data-id]")]
-      .map(r => r.dataset.id);
-    const oldOrder = q.waiting.map(w => w.id);
-    if (newOrder.join(",") === oldOrder.join(",")) return;
-    await reorderQueue(newOrder);
-  });
+
+  // Update or create rows
+  for (const w of q.waiting) {
+    let row = existing.get(w.id);
+    if (!row) {
+      row = createQueueRow(w);
+      rows.appendChild(row);
+    } else {
+      updateQueueRow(row, w);
+    }
+  }
+}
+
+function createQueueRow(w) {
+  const [cls, text] = queueBadge[w.state] || ["", w.state];
+  const t = new Date(w.arrived * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  const snip = w.snippet || w.id;
+  const shown = snip.length > 90 ? snip.slice(0, 90) + "..." : snip;
+  const sessionName = w.session_name || snip;
+  const sessionShown = sessionName.length > 60 ? sessionName.slice(0, 60) + "..." : sessionName;
+  const focused = w.id === $("queue-card")?.querySelector(":scope > div.queue-expanded")?.dataset?.focusedId;
+
+  const mainRow = document.createElement("tr");
+  mainRow.className = "queue-row";
+  mainRow.dataset.id = w.id;
+  mainRow.dataset.focused = focused ? "true" : "";
+  mainRow.innerHTML = `
+    <td class="qgrip" data-action="expand">${icon("grip")}</td>
+    <td class="muted small">${esc(t)}</td>
+    <td class="num">${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}</td>
+    <td><span class="st-badge ${cls}">${esc(text)}</span></td>
+    <td title="${esc(sessionName)}">${esc(sessionShown)}</td>
+    <td class="muted small">${esc(w.path.replace(/^\/v1/, ""))}</td>
+    <td><button class="st-btn st-btn--secondary" data-queue-focus="${focused ? "" : w.id}" title="${focused ? "Unfocus" : "Focus"}">${focused ? icon("lock-fill") : icon("lock")}</button></td>`;
+
+  const detailRow = document.createElement("tr");
+  detailRow.className = "queue-row-expanded";
+  detailRow.dataset.id = w.id;
+  detailRow.hidden = true;
+  detailRow.innerHTML = `
+    <td colspan="6">
+      <div class="queue-expanded-detail">
+        <div><strong>Session name:</strong> <span class="detail-session">${esc(sessionName)}</span></div>
+        <div><strong>Last user message:</strong> <span class="detail-message">${esc(snip)}</span></div>
+        <div><strong>Prompt tokens:</strong> <span class="detail-tokens">${fmt(w.prompt_tokens)}</span> <span class="muted small">(${w.small ? "small" : "big"})</span></div>
+        <div><strong>Endpoint:</strong> <span class="detail-path">${esc(w.path.replace(/^\/v1/, ""))}</span></div>
+        <div><strong>Waited:</strong> <span class="detail-wait">${w.waited_s.toFixed(1)} s</span></div>
+      </div>
+    </td>`;
+
+  return { mainRow, detailRow };
+}
+
+function updateQueueRow(row, w) {
+  const [cls, text] = queueBadge[w.state] || ["", w.state];
+  const t = new Date(w.arrived * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  const snip = w.snippet || w.id;
+  const shown = snip.length > 90 ? snip.slice(0, 90) + "..." : snip;
+  const sessionName = w.session_name || snip;
+  const sessionShown = sessionName.length > 60 ? sessionName.slice(0, 60) + "..." : sessionName;
+  const focused = w.id === $("queue-card")?.querySelector(":scope > div.queue-expanded")?.dataset?.focusedId;
+
+  const cells = row.mainRow.querySelectorAll("td");
+  // Cell 0: grip (expand trigger)
+  cells[0].dataset.action = "expand";
+  cells[0].innerHTML = icon("grip");
+  // Cell 1: arrived time
+  cells[1].textContent = t;
+  cells[1].className = "muted small";
+  // Cell 2: tokens
+  cells[2].innerHTML = `${fmt(w.prompt_tokens)}${w.small ? ' <span class="muted small" title="small prompts run at once: they never wait">small</span>' : ""}`;
+  // Cell 3: state badge
+  const badge = cells[3].querySelector(".st-badge");
+  if (badge) {
+    badge.className = `st-badge ${cls}`;
+    badge.textContent = text;
+  }
+  // Cell 4: session name
+  cells[4].title = sessionName;
+  cells[4].textContent = sessionShown;
+  // Cell 5: endpoint
+  cells[5].textContent = w.path.replace(/^\/v1/, "");
+  cells[5].className = "muted small";
+  // Cell 6: focus button
+  const btn = cells[6].querySelector("button");
+  if (btn) {
+    btn.dataset.queueFocus = focused ? "" : w.id;
+    btn.title = focused ? "Unfocus" : "Focus";
+    btn.innerHTML = focused ? icon("lock-fill") : icon("lock");
+  }
+
+  // Update detail row if visible
+  const detailRow = row.detailRow;
+  if (detailRow && !detailRow.hidden) {
+    detailRow.querySelector(".detail-session").textContent = sessionName;
+    detailRow.querySelector(".detail-message").textContent = snip;
+    detailRow.querySelector(".detail-tokens").innerHTML = `${fmt(w.prompt_tokens)} <span class="muted small">(${w.small ? "small" : "big"})</span>`;
+    detailRow.querySelector(".detail-path").textContent = w.path.replace(/^\/v1/, "");
+    detailRow.querySelector(".detail-wait").textContent = `${w.waited_s.toFixed(1)} s`;
+  }
 }
 
 $("queue-expand").addEventListener("click", () => {
@@ -604,8 +668,22 @@ $("queue-skip").addEventListener("click", async () => {
   if (!r.ok) toast("error", "Skip failed", `HTTP ${r.status}`);
 });
 $("queue-rows").addEventListener("click", async (e) => {
-  const id = e.target.dataset ? e.target.dataset.queueFocus : undefined;
-  if (id === undefined) return;                    // not one of the row buttons
+  // Handle expand/collapse (grip cell)
+  const gripCell = e.target.closest("td[data-action='expand']");
+  if (gripCell) {
+    const mainRow = gripCell.closest("tr[data-id]");
+    if (!mainRow) return;
+    const detailRow = mainRow.parentElement.querySelector(`tr[data-id="${mainRow.dataset.id}"].queue-row-expanded`);
+    if (detailRow) {
+      detailRow.hidden = !detailRow.hidden;
+    }
+    return;
+  }
+
+  // Handle focus/unfocus button
+  const btn = e.target.closest("button[data-queue-focus]");
+  if (!btn) return;
+  const id = btn.dataset.queueFocus || undefined;
   const r = await fetch(id ? "api/queue/focus" : "api/queue/unfocus",
                         {method: "POST", headers: headers(true), body: JSON.stringify(id ? {id} : {})});
   if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);

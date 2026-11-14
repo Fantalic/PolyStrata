@@ -71,7 +71,7 @@ from serve.structured import StructuredOutputError, prepare_format, validated_js
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
-from serve.affinity import Affinity, last_user_snippet  # noqa: E402
+from serve.affinity import Affinity, first_user_snippet, last_user_snippet  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -4209,7 +4209,9 @@ class Service:
         """#332: a monitor record for this request, or None when the monitor is off (nothing is kept then).
         Either way the request's light identity (path, the last user message's start) is stashed for
         the affinity admission: the queue view shows it while the request waits for its turn."""
-        pending = {"id": uuid.uuid4().hex[:12], "path": path, "snippet": last_user_snippet(req)}
+        pending = {"id": uuid.uuid4().hex[:12], "path": path,
+                   "snippet": last_user_snippet(req),
+                   "session_name": first_user_snippet(req) or last_user_snippet(req)}
         self.request_trace.pending = pending
         if not self.api_monitor:
             return None
@@ -4782,10 +4784,12 @@ class Service:
         self.affinity.unregister(entry.id if entry else None)
         self.fifo.release()
 
-    def _served_turn(self, ids):
+    def _served_turn(self, ids, entry=None):
         """The request's prompt ran on the engine (still holding the FIFO): the admission remembers
-        the conversation and arms the hold when no continuation is already waiting."""
-        self.affinity.served(ids)
+        the conversation and arms the hold when no continuation is already waiting.  `entry` is the
+        request's own admission entry: served() runs before _release_turn (ExitStack LIFO), so the
+        entry is still registered and must not count as its own follower."""
+        self.affinity.served(ids, entry)
 
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
@@ -4884,7 +4888,8 @@ class Service:
         if not par:
             pending = getattr(self.request_trace, "pending", None) or {}
             entry = self.affinity.register(pending.get("id"), ids, pending.get("path", ""),
-                                           pending.get("snippet", ""))
+                                           pending.get("snippet", ""), pending.get("session_name", ""))
+
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
         # window (self.status says busy while any runs); one at a time they are self.status / self.rate, as before
         st = {} if par else self.status
@@ -4969,7 +4974,7 @@ class Service:
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
                     if entry is not None:            # the conversation is served: ExitStack runs this
-                        turn.callback(self._served_turn, ids)   # before _release_turn (LIFO)
+                        turn.callback(self._served_turn, ids, entry)   # before _release_turn (LIFO)
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
                     for ev in opening:
                         yield "event", ev
