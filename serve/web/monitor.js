@@ -224,3 +224,28 @@ document.querySelectorAll("[data-pane]").forEach(button => { button.onclick = ()
 $("copy").onclick = async () => { try { await navigator.clipboard.writeText($("content").textContent); text("copy", "Copied"); setTimeout(() => text("copy", "Copy"), 1500); } catch (_) { notice("Clipboard unavailable; select the text to copy it."); } };
 async function poll() { await refresh(); setTimeout(poll, 2000); }
 poll();
+
+// ------------------------------------------------------------------ Local context debug badge
+let lastCompressionCount = -1;
+async function pollLocalContext() {
+  try {
+    const res = await fetch("http://127.0.0.1:8765/api/local-context/state", {cache:"no-store"});
+    if (!res.ok) return;
+    const state = await res.json();
+    const count = (state.compression || []).length;
+    if (count !== lastCompressionCount) {
+      lastCompressionCount = count;
+      const badge = $("debug-badge");
+      if (count > 0) {
+        badge.textContent = count;
+        badge.hidden = false;
+        badge.style.background = "var(--st-accent-tint)";
+        badge.style.color = "var(--st-accent-text)";
+      } else {
+        badge.hidden = true;
+      }
+    }
+  } catch { /* local-context server not running */ }
+}
+setInterval(pollLocalContext, 5000);
+pollLocalContext();

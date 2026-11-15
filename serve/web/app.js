@@ -264,6 +264,7 @@ function render(m) {
   if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (tab === "monitor") renderConvCache(m.conversation_cache);
   if (tab === "monitor") pollQueue();
+  if (tab === "monitor") pollLCBadge();
   if (tab === "about") renderAbout(eng, hw, st);
 }
 
@@ -488,6 +489,39 @@ async function pollQueue() {
     renderQueue(q);
   } catch (e) {
     $("queue-card").hidden = true;                 // no endpoint: an older server
+  }
+}
+
+// Local-context debug badge: poll the debug server and show compression event count
+let lcBadgeCount = 0;
+
+async function pollLCBadge() {
+  const badge = $("lc-badge");
+  if (!badge) return;
+  try {
+    const r = await fetch("http://127.0.0.1:8765/api/local-context/config", {signal: AbortSignal.timeout(2000)});
+    if (!r.ok) { badge.style.display = "none"; return; }
+    badge.style.display = "inline";
+  } catch {
+    badge.style.display = "none";
+    return;
+  }
+  try {
+    const r = await fetch("http://127.0.0.1:8765/api/local-context/state", {signal: AbortSignal.timeout(2000)});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const state = await r.json();
+    let count = 0;
+    if (state.compression && Array.isArray(state.compression)) {
+      count = state.compression.length;
+    }
+    if (count !== lcBadgeCount) {
+      lcBadgeCount = count;
+      badge.textContent = count;
+      badge.style.display = count > 0 ? "inline" : "none";
+      badge.classList.toggle("on", count > 0);
+    }
+  } catch {
+    // not available yet, badge stays hidden
   }
 }
 
