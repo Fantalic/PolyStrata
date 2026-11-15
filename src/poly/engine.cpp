@@ -14,7 +14,7 @@
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
 #if defined(STRATA_GPU_METAL)
-#include "strata/core/conversation_memory.hpp"
+#include "strata/poly/conversation_memory.hpp"
 #include "strata/gpu/metal.hpp"
 #endif
 #include "strata/kernels/native_mmvq.hpp"

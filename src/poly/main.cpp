@@ -9,7 +9,7 @@
 #include "engine.hpp"
 #include "guesses.hpp"
 #include "spill.hpp"
-#include "strata/core/conversation_memory.hpp"
+#include "strata/poly/conversation_memory.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 
