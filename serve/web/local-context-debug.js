@@ -8,12 +8,21 @@ let currentSession = null;
 let selectedChunkIndex = -1;
 let autoPoll = true;
 let pollTimer = null;
+let activeSessionID = null; // Set by the /active endpoint
 
 // ------------------------------------------------------------------ Fetch
 async function fetchData() {
   try {
     const res = await fetch(API + "/state");
     data = await res.json();
+    // Fetch active session indicator (separate endpoint)
+    try {
+      const resp = await fetch(API + "/active");
+      if (resp.ok) {
+        const actData = await resp.json();
+        activeSessionID = actData.sessionID || null;
+      }
+    } catch {}
     renderAll();
   } catch (e) {
     console.error("fetch error:", e);
@@ -32,24 +41,77 @@ function renderAll() {
 // ------------------------------------------------------------------ Session select
 function renderSessionSelect() {
   const sel = $("session-select");
+  const delBtn = $("lc-delete-btn");
   if (!data || !data.sessions || data.sessions.length === 0) {
     sel.innerHTML = '<option value="">- No sessions -</option>';
     currentSession = null;
+    delBtn.style.display = "none";
     return;
   }
 
-  const currentVal = sel.value;
-  sel.innerHTML = data.sessions.map(s => {
-    const todoDone = (s.todo || []).filter(t => t.done).length;
-    const total = (s.todo || []).length;
+  // Group sessions by rootSessionID for parent-child display
+  // rootSessionID === null or rootSessionID === sessionID => root session
+  // rootSessionID !== sessionID => child session
+  const rootSessions = [];
+  const childMap = {}; // rootID -> [children]
+  data.sessions.forEach(s => {
+    const rootID = s.rootSessionID || null;
+    if (!rootID || rootID === s.id) {
+      // This is a root session
+      rootSessions.push(s);
+    } else {
+      // This is a child session
+      if (!childMap[rootID]) childMap[rootID] = [];
+      childMap[rootID].push(s);
+    }
+  });
+
+  // Format a session label: use sessionLabel if available, fall back to id prefix
+  function formatLabel(s) {
+    const display = s.sessionLabel || s.id.slice(0, 16);
+    const tasks = (s.todo || []).length;
     const chunks = (s.chunks || []).length;
-    const label = s.id.slice(0, 16) + " (tasks:" + total + " chunks:" + chunks + ")";
-    return '<option value="' + s.id + '"' + (s.id === currentVal ? ' selected' : '') + '>' + label + '</option>';
-  }).join("");
+    return display + " (tasks:" + tasks + " chunks:" + chunks + ")";
+  }
+
+  // Check if a session is the active one
+  function isActive(s) {
+    return activeSessionID === s.id;
+  }
+
+  const currentVal = sel.value;
+  let options = "";
+
+  // Render root sessions first
+  rootSessions.forEach(s => {
+    const label = formatLabel(s);
+    const activeTag = isActive(s) ? " (active)" : "";
+    const selected = s.id === currentVal ? ' selected' : "";
+    const activeClass = isActive(s) ? " lc-option-active" : "";
+    options += '<option value="' + s.id + '"' + selected + activeClass + '>' + label + activeTag + '</option>';
+
+    // Then render its children (indented)
+    if (childMap[s.id]) {
+      childMap[s.id].forEach(c => {
+        const childLabel = formatLabel(c);
+        const childActiveTag = isActive(c) ? " (active)" : "";
+        const childSelected = c.id === currentVal ? ' selected' : "";
+        const childActiveClass = isActive(c) ? " lc-option-active" : "";
+        options += '<option value="' + c.id + '"' + childSelected + childActiveClass + '>' +
+          "  \u2514\u2500 " + childLabel + childActiveTag + '</option>';
+      });
+    }
+  });
+
+  sel.innerHTML = options;
+
+  // Show/hide delete button based on selection
+  delBtn.style.display = sel.value ? "inline-block" : "none";
 
   sel.onchange = () => {
     currentSession = sel.value || null;
     selectedChunkIndex = -1;
+    delBtn.style.display = currentSession ? "inline-block" : "none";
     renderDashboard();
   };
 
@@ -59,8 +121,26 @@ function renderSessionSelect() {
     if (first) {
       currentSession = first.id;
       sel.value = currentSession;
+      delBtn.style.display = "inline-block";
       renderDashboard();
     }
+  }
+}
+
+// ------------------------------------------------------------------ Delete session
+async function deleteSession(sessionID) {
+  if (!confirm("Delete session " + sessionID + "? This cannot be undone.")) return;
+  try {
+    const resp = await fetch(API + "/delete?key=lc:" + sessionID, { method: "POST" });
+    if (resp.ok) {
+      // Clear current session if it was the deleted one
+      if (currentSession === sessionID) currentSession = null;
+      fetchData(); // Refresh everything
+    } else {
+      alert("Delete failed");
+    }
+  } catch (e) {
+    alert("Delete error: " + e.message);
   }
 }
 
@@ -225,6 +305,11 @@ function escapeHtml(text) {
 $("auto-refresh").addEventListener("change", (e) => {
   autoPoll = e.target.checked;
   startPolling();
+});
+
+// Delete button handler
+$("lc-delete-btn").addEventListener("click", () => {
+  if (currentSession) deleteSession(currentSession);
 });
 
 function startPolling() {

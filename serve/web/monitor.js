@@ -100,6 +100,8 @@ async function refresh() {
     list(); if (selected) await showDetail();
     text("updated", `Live · updated ${new Date().toLocaleTimeString()}`);
     if (!operating) notice(actionError);
+    // Update the compressed badge whenever the monitor refreshes.
+    updateCompressedBadge();
   } catch (error) { notice(error.message); text("updated", "Disconnected · retrying"); $("load").disabled = $("unload").disabled = true; }
 }
 
@@ -225,6 +227,39 @@ $("copy").onclick = async () => { try { await navigator.clipboard.writeText($("c
 async function poll() { await refresh(); setTimeout(poll, 2000); }
 poll();
 
+// ------------------------------------------------------------------ Compressed badge: local-context compression indicator
+// Shows a "Compressed" badge when the local-context plugin has folded/
+// compressed the current session's context. Checks the local-context debug
+// server (port 8765) and looks for any session with folded===true and
+// chunkCount>0. The badge appears inline with the model state indicator.
+async function checkLocalContextCompression() {
+  try {
+    const res = await fetch("http://127.0.0.1:8765/api/local-context/state", {
+      cache: "no-store",
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    // Show the badge when any session has been compressed (folded with chunks).
+    // The monitor does not track individual sessions, so we check all sessions.
+    const sessions = data.sessions || [];
+    return sessions.some(
+      (s) => s.folded === true && s.chunkCount > 0,
+    );
+  } catch {
+    /* local-context server not running */
+    return false;
+  }
+}
+
+async function updateCompressedBadge() {
+  const compressed = await checkLocalContextCompression();
+  const badge = $("compressed-badge");
+  if (badge) {
+    badge.hidden = !compressed;
+    badge.style.display = compressed ? "" : "none";
+  }
+}
+
 // ------------------------------------------------------------------ Local context debug badge
 let lastCompressionCount = -1;
 async function pollLocalContext() {
@@ -246,6 +281,8 @@ async function pollLocalContext() {
       }
     }
   } catch { /* local-context server not running */ }
+  // Also update the compressed badge from the local-context poll.
+  updateCompressedBadge();
 }
 setInterval(pollLocalContext, 5000);
 pollLocalContext();
