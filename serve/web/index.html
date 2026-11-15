@@ -29,6 +29,8 @@
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-activity"/></svg>Monitor</button>
     <button class="st-tab" role="tab" id="tab-btn-models" aria-controls="view-models" aria-selected="false" data-tab="models">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-settings"/></svg>Models</button>
+    <button class="st-tab" role="tab" id="tab-btn-requests" aria-controls="view-requests" aria-selected="false" data-tab="requests">
+      <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-layers"/></svg>Requests</button>
     <button class="st-tab" role="tab" id="tab-btn-about" aria-controls="view-about" aria-selected="false" data-tab="about">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-info"/></svg>About</button>
   </nav>
@@ -109,6 +111,7 @@
             <span class="st-badge st-badge--queued" data-s="queued">Queued</span>
             <span class="st-badge st-badge--error" data-s="error">Error</span>
           </span>
+          <a href="web/local-context-debug.html" id="lc-debug-link" style="color:inherit;text-decoration:none;flex-shrink:0"><button id="lc-debug" style="font-size:12px;padding:4px 10px;border-radius:7px;cursor:pointer;color:inherit;background:var(--st-surface-2);border:1px solid var(--st-line)">Context debug <span id="lc-badge" class="st-badge" style="margin-left:4px;display:none">0</span></button></a>
         </div>
         <div class="state-card__row"><span id="state-label">Waiting for a request</span><span class="muted" id="state-detail"></span></div>
         <div class="st-progress" id="state-progress"><div class="st-progress__bar" id="state-bar" style="width:0%"></div></div>
@@ -208,6 +211,19 @@
         <div class="mcp-list" id="mcp-list"></div>
         <p class="muted small mcp-note">Their tools run on this PC with your rights, when the model decides to call them
           (in this page's chat only; switch it off in Sampling).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ Requests ============================ -->
+  <section class="view view--requests" id="view-requests" role="tabpanel" aria-labelledby="tab-btn-requests" hidden>
+    <iframe class="requests-frame" id="requests-frame" title="API monitor" hidden></iframe>
+    <div class="about" id="requests-off" hidden>
+      <div class="st-card">
+        <span class="card-title">The API monitor is off</span>
+        <p class="muted">It keeps the last 100 requests' prompts and answers in memory, so it is off by default. To turn it
+          on, add <code>"api_monitor": true</code> to the model's config file (<code>strata-&lt;model&gt;.json</code>) or
+          start the server with <code>--api-monitor</code>, then restart it.</p>
       </div>
     </div>
   </section>

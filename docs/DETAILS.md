@@ -519,7 +519,7 @@ Windows, `build-essential` + CUDA on Ubuntu) and compiles the engine for your GP
 
 Then it downloads and prepares everything (the model is 66-76 GB, so the first start takes a while; an interrupted
 download continues where it stopped) and **starts the model**: your browser opens `http://127.0.0.1:8080`, the PolyStrata
-app. It has three tabs:
+app. It has four tabs:
 - **Chat:** streaming answers, the model's thinking (folded away once it answers), code with a copy button, pictures when
   images are on, and sampling and thinking-level settings. Chats stay in your browser.
 - **Monitor:** what the model is doing (reading the prompt, with progress, or writing, at how many tokens/s); GPU load,
@@ -529,6 +529,7 @@ On a Mac (Metal backend) the Monitor's GPU load and VRAM come from IOKit's IOAcc
 Utilization % and its in-use system memory, against the device's Metal working set - and the card says the rest: there
 is no temperature or power reading without root (`powermetrics`), and an Apple Silicon GPU sits on the die, so there is
 no PCIe link. The engine's own VRAM figures are in its log.
+- **Requests:** the [API request monitor](#api-request-monitor) when it is on, or how to turn it on.
 - **About:** the model and engine settings, and the addresses to connect other apps.
 
 `http://127.0.0.1:8080/?q=your question` opens it with a new chat already asking. The API is at
@@ -1033,7 +1034,8 @@ print(r.choices[0].message.content)
   throughout.
 - **Model settings in the web page (0.1.39, #564).** The About tab's Model settings card shows and changes a few of
   the keys above in `strata-<model>.json`: the `sampling` defaults (temperature, top_p, top_k, min_p),
-  `reasoning_budget_tokens`, `fit_max_tokens`, `anthropic_thinking`, `effort_position`, `aliases`, `idle_unload_s`,
+  `reasoning_budget_tokens`, `fit_max_tokens`, `drop_oldest`, `truncate_middle`, `anthropic_thinking`,
+  `effort_position`, `aliases`, `idle_unload_s`,
   `lazy_load`, `engine_silence_s`, `api_monitor`, `switch_on_request`, `open_browser` and `--vram-reserve-mib`. An empty field removes the
   key (its default). Every other key of the file stays as it is, the earlier file is kept as
   `strata-<model>.json.bak`, and the model uses the change from its next start, or the next switch to it. Only
@@ -1042,7 +1044,7 @@ print(r.choices[0].message.content)
 - **Switching models in the web page (#37).** With more than one model installed, the chat page's model list switches
   the server to another one without a restart: the loaded model is stopped first (its VRAM and memory are given back),
   then the other one starts. Each model runs with its own `strata-<model>.json`: its `sampling`, `reasoning_effort`,
-  `reasoning_budget_tokens`, `drop_oldest`, `preserve_thinking`, `aliases`, `idle_unload_s`, `before_load`,
+  `reasoning_budget_tokens`, `drop_oldest`, `truncate_middle`, `preserve_thinking`, `aliases`, `idle_unload_s`, `before_load`,
   `min_free_vram_mib` and the other keys of this list, and its own Chat settings shared with other apps
   (`strata-<model>.shared-settings.json`). The server's own keys come from the config it started with: `host`,
   `port`, `api_key`, `allowed_hosts`, `cors_origins`, `trusted_origins`, `api_monitor`, `mcp_servers`,
@@ -1152,6 +1154,7 @@ it decodes when the conversation never left (`tools/parking_test.py`). FP16,
 INT8, Q4_0 and identity-layout K8V4 snapshots are supported; the K8V4 draft ring
 remains INT8, as in upstream. Windows/HIP and multi-GPU runtime coverage must be
 reported separately from Linux/CUDA evidence.
+Each parked conversation's blob is written to a temporary file between requests and its heap freed; a later restore maps that file instead of reading from RAM. Set `STRATA_NO_SPILL=1` on the engine command line or in the config's `"env"` (any nonzero value) to keep every blob on the heap (parking still works, but RAM use grows accordingly).
 
 The web page's Monitor tab has a **Conversation cache** card (0.1.39, #596): the parked conversations against the
 slots and the RAM budget, how many were parked, restored and evicted, and the last switch (read from the engine's
@@ -1685,15 +1688,19 @@ like `nvidia-smi`) to the `"vision"` section of `strata-<model>.json`: the encod
 `--vram-reserve-mib` in `"args"` to 700 as well, so the engine's cards keep that VRAM for the expert cache. The
 encoder's card needs code in the ready-made encoder (RTX 20/30/40/50).
 
-**The encoder only while there are pictures (opt-in, `"elastic": true` in the `"vision"` section, with the config's
-`"vram_elastic": true`; [VRAM_ELASTIC.md](VRAM_ELASTIC.md#the-image-encoder-on-demand)):** the GPU encoder does not start
+**The encoder only while there are pictures (the default on the CPU; on the GPU opt-in, `"elastic": true` in the
+`"vision"` section, with the config's `"vram_elastic": true`;
+[VRAM_ELASTIC.md](VRAM_ELASTIC.md#the-image-encoder-on-demand)):** an encoder on the CPU (`"gpu": false`, what setup
+writes for a card under 24 GB) starts with the first picture and stops after `"elastic_idle_s"` (default 120) without
+one; `"elastic": false` keeps it running. Qwen3.6's held 1.08 GiB of RAM and started in 1 to 2 s on the laptop
+(i7-14700HX). The GPU encoder does not start
 with the server, so the expert cache keeps all of the VRAM. The first picture's turn makes the cache keep
 `"elastic_mib"` (default 2048) free and starts the encoder there (a few seconds); later pictures use it as it is, and
 after `"elastic_idle_s"` (default 120) without a picture it stops and the cache takes the VRAM back. Measured on an R9700
 32 GB (gfx1201, Linux, UD-IQ4_XS, the BF16 encoder at up to 1,024 tokens, #2189 for HIP's virtual memory): the encoder
 took 1,339 MiB and started in 4.7 s (2.7 s the next time); a request with one picture took 8.6 s with the start and
 5.0 s on a later cold start, and 2 / 5 / 10 pictures with the encoder running took 3.8 / 5.6 / 9.0 s (~0.45 s to encode
-each, the same as on a second card). Without the key nothing changes.
+each, the same as on a second card). Without the key a GPU encoder runs as before.
 
 ### Sending a picture
 
@@ -2297,7 +2304,7 @@ then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without
 Off by default, since it keeps prompts and answers in memory: turn it on with `"api_monitor": true` in
 `strata-<model>.json` (or `serve/server.py --api-monitor`); otherwise nothing is recorded and the two endpoints below
 answer 404.
-Open `/api-monitor` to inspect API traffic without opening a chat. It shows the model state, safe
+Open `/api-monitor`, or the web app's Requests tab, to inspect API traffic without opening a chat. It shows the model state, safe
 load/unload controls, active/queued requests, original request bodies, output, separate reasoning and
 non-stream response bodies. Total wall-clock includes FIFO waits and automatic loading; load, queue,
 first-token, prompt/output tokens and engine decode timing are shown separately.
@@ -2305,7 +2312,8 @@ first-token, prompt/output tokens and engine decode timing are shown separately.
 `GET /api/requests` returns compact summaries; `GET /api/requests?id=<id>` returns one retained request.
 Both use the existing API-key check. The monitor retains the newest **100 requests in memory** until restart,
 with **262,144 characters per input/output/reasoning/response field** and visible truncation flags. The actual API
-responses are unaffected. Headers are not recorded, and the monitor key is kept in this tab's session storage.
+responses are unaffected. Headers are not recorded, and the monitor key is kept in this tab's session storage
+(in the Requests tab, the key saved in the app's Settings is used).
 Treat request history as sensitive input/output when exposing PolyStrata on a network: set an API key as above.
 The page uses relative URLs and works through the existing host binding or a reverse proxy.
 
@@ -2398,3 +2406,53 @@ Runtime measurements used SM89. CUDA 13.3 compilation was checked for the SM120/
 adapter, but Blackwell runtime testing is still needed. HIP and SYCL were not built here; the CUDA library
 is excluded on those backends. This experimental opt-in changes floating-point accumulation and can change
 outputs. Prefill gains do not guarantee faster generation; some measured long-response TG runs regressed.
+
+## strata-poly: streaming CPU copies for expert staging
+
+`STRATA_POLY_STREAM_STAGE=1` uses SSE2 streaming stores when packing experts into the existing host upload
+buffers during prefill. Unset or `0` keeps the stock copies. The setting is captured at engine initialization;
+restart to change it. It can also be set in the server model's `env` map. Builds without SSE2 keep stock copies.
+This applies to the shared strata-poly staging path; the original strata engine and background expert swaps
+are unchanged. No extra host or GPU buffer is allocated, and the model file mapping is unchanged.
+
+## strata-poly: size-class MMQ launches for staged experts
+
+While a prompt is read, the experts that are not in VRAM are copied through the staging buffer and multiplied by
+llama.cpp's quantized matrix kernels (MMQ), the experts of a round in one launch. That launch takes its tile
+width, the number of rows of a tile, from its largest expert (`mul_mat_q_switch_J`), and a tile computes all of
+its columns whatever rows are in them. A prompt batch spreads its rows unevenly: on the RX 5700 XT run below
+the median staged expert had 15 rows and the largest 463, so every launch used the widest tile (64) and only 43%
+of the columns it computed held a row.
+
+`STRATA_POLY_STAGED_TILES=8,16,32` puts the experts of a round in size classes (up to 8 rows, up to 16, up to
+32, more) and makes one launch for each class that has rows, so that each uses the tile its experts need. The
+numbers are ascending row counts, at most 7 of them. Unset, empty or invalid (a message is printed) keeps the
+single launch. The setting is read when the engine starts, so restart to change it, and it can be set in the
+server model's `env` map. A round's rows lie class after class, and each class has its own bounds in which the
+other classes' experts have no rows, as the cached experts' classes already do. A row's products are then
+the single launch's to the bit on a card whose MMQ does not use stream-k (AMD RDNA and GCN, NVIDIA Pascal). On
+one that does (NVIDIA from Volta, AMD CDNA) stream-k shares a tile's sum between blocks by the launch's tile
+count, so the class launches add the same parts in another order and agree within rounding: on an RTX PRO 6000
+the rows differed in the last bit or two, and a 256-token Qwen3.6 answer to a 32K prompt (experts frozen)
+left the single launch's at token 180. `poly_mmq_tiles_test` checks the first to the bit and the second within rounding. The
+tables grow by
+`2 x 8 x (2 x experts + 2)` integers (33 KB for 256 experts), allocated whether or not it is set. Experts already in VRAM keep
+their own classes.
+
+Measured on an RX 5700 XT 8 GB (gfx1010), Windows, Tiel Coder 35B-A3B UD-Q4_K_XL, `--kv q8_0`,
+`--vram-reserve-mib 384`, a cold prompt of 18,932 tokens (the repository's docs text), one engine start for
+each run, tokens/s of the prompt read:
+
+| `STRATA_POLY_STAGED_TILES` | run 1 | run 2 |
+|---|---|---|
+| unset | 246.9 | 248.5 |
+| `8,16,32` | 272.8 | 270.9 |
+| `4,8,16,32` | 274.4 | |
+
+That is +10%. On the same card with the engine's other gfx1010 changes (not in this tree: the SDWA int8 dot
+product, the FP32 prompt attention) the prompt read of 77,136 tokens went from 297 to 339 tokens/s (+14%) and
+of 18,932 tokens from 390 to 471 (+21%): the staged experts' launches are a larger share of the prompt there.
+More classes than `8,16,32` gained nothing measurable. The gain depends on how unevenly the rows fall, so on the
+number of tokens in a batch, the number of experts, how many are cached in VRAM and the card's tile table; a
+card with a different MMQ tile table (`mmq-config-*.cuh`) may gain more, less or nothing. Only gfx1010 was
+measured.

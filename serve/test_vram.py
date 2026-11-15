@@ -72,6 +72,9 @@ class EngineCommand(unittest.TestCase):
         self.assertEqual(engine_args({**cfg, "vram_elastic": True, "vram_segment_mib": 256}),
                          ["--max-context", "8192", "--vram-elastic", "--vram-segment-mib", "256"])
         self.assertEqual(engine_args({**cfg, "vram_elastic": "yes"}), ["--max-context", "8192"])
+        # strata-poly has no such option and ends at one it does not know: its cache is resized as it is
+        poly = {**cfg, "exe": "engine-poly/strata-poly.exe", "vram_elastic": True, "vram_segment_mib": 256}
+        self.assertEqual(engine_args(poly), ["--max-context", "8192"])
 
     def test_config_key_needs_the_engine_to_know_the_flag(self):
         # A binary without --vram-elastic dies on it before it reads anything, so engine_args degrades

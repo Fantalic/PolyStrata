@@ -1,12 +1,14 @@
 // src/poly/conversations_test.cpp - Conversations against an engine whose state can be checked: after every
 // request the engine must hold exactly what reading the prompt from its first token gives.
 //
-//   g++ -std=c++20 src/poly/conversations_test.cpp -o conversations_test && ./conversations_test
+//   g++ -std=c++20 src/poly/conversations_test.cpp src/poly/spill.cpp -o conversations_test && ./conversations_test
 #include "conversations.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <thread>
 
 using strata::poly::CacheOptions;
 using strata::poly::Conversations;
@@ -32,6 +34,8 @@ struct Fake {
     int64_t at = 0, read = 0;
     size_t state = 8;   // bytes a checkpoint takes; the hash is the first 8
     std::vector<uint64_t> a = std::vector<uint64_t>(ctx), b = std::vector<uint64_t>(ctx);
+    mutable int save_rows_calls = 0;     // how many times save_rows was called
+    mutable size_t save_rows_bytes = 0;  // total bytes written by save_rows
 
     void reset() { h = 1, at = 0; }
     void eval(const int32_t* t, int64_t n) {
@@ -45,6 +49,8 @@ struct Fake {
     void load_state(const uint8_t* src, int64_t pos) { std::memcpy(&h, src, 8), at = pos; }
     size_t row_bytes() const { return 16; }
     void save_rows(int64_t first, int64_t n, uint8_t* dst) const {
+        ++save_rows_calls;
+        save_rows_bytes += (size_t) n * row_bytes();
         std::memcpy(dst, &a[(size_t) first], (size_t) n * 8);
         std::memcpy(dst + n * 8, &b[(size_t) first], (size_t) n * 8);
     }
@@ -118,6 +124,7 @@ struct Chat {
             ids.push_back(t);
         }
         check(e.holds(ids) && kept.seq() == ids, "the engine holds the prompt and the reply");
+        kept.release();   // between requests, as the server does: what comes back is read from the file cache
         return from;
     }
 };
@@ -287,6 +294,64 @@ void any_order() {
     }
 }
 
+// pre_park copies rows to host memory without cutting the slot: a continuing request finds the engine at its live
+// position (the full sequence length), not at a checkpoint.
+void pre_park_keeps_live_position() {
+    Chat c(options(64));
+    std::vector<int32_t> a = text(1, 5000);
+    c.ask(a);  // engine has 5003 tokens (5000 prompt + 3 reply)
+    check(c.kept.pre_park(), "pre_park succeeds with budget");
+    check(c.kept.seq().size() == 5003, "pre_park does not truncate the slot");
+    // Continue with the same tokens + more: the engine is at its live position
+    std::vector<int32_t> extended = c.kept.seq();
+    extended = extended + text(2, 300);
+    check(c.ask(extended) == 5003, "resume with extended same-sequence hits engine's live position");
+}
+
+// After pre_park, a switch parks the conversation (already pre-parked, so rows are in the blob).  Coming back to it
+// restores the rows from the pre-parked blob.  The fake engine tracks save_rows calls/bytes to verify.
+void pre_parked_rows_restore_on_switch() {
+    Chat c(options(64));
+    std::vector<int32_t> a = text(1, 5000);
+    c.ask(a);  // engine has 5003 tokens
+    c.kept.pre_park();  // save rows, no cut
+    const int saved_calls = c.e.save_rows_calls, saved_bytes = (int) c.e.save_rows_bytes;
+    // Switch to another conversation - parks a: the rows are already in the pre-parked blob, so the park copies
+    // nothing new
+    std::vector<int32_t> b = text(99, 3000);
+    c.ask(b);  // switches to b, parks a
+    check(c.e.save_rows_calls == saved_calls, "the switch's park called save_rows no more than pre_park did");
+    check((int) c.e.save_rows_bytes == saved_bytes, "the switch's park copied no new bytes (already pre-parked)");
+    // Come back to a: it was parked at its last checkpoint, so it is taken up there
+    std::vector<int32_t> a2 = a;
+    const int64_t from = c.ask(a2);
+    check(from == 4999, "restoring a goes to its last checkpoint");
+    check(c.e.holds(a2), "the engine holds the restored conversation");
+    // Continue with the same conversation: it was pre-parked, never cut, so the engine still holds it whole and
+    // the extension goes on from where the last ask left it
+    a2 = a2 + text(2, 300);
+    const int64_t live = (int64_t) c.kept.seq().size();
+    check(c.ask(a2) == live, "continuing a goes on from the engine's live position");
+    // Switch again - parks a again, and now the rows read since the pre-park are new
+    std::vector<int32_t> d = text(88, 2000);
+    c.ask(d);  // switches, parks a
+    check(c.e.save_rows_bytes > (size_t) saved_bytes, "the second park copied the rows read since the pre-park");
+}
+
+// pre_park respects the budget: park_mib too small (0) -> returns false, conversation untouched.
+void pre_park_respects_budget() {
+    CacheOptions o = options(0);
+    o.park_mib = 0;  // no budget
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 5000);
+    c.ask(a);
+    check(!c.kept.pre_park(), "pre_park fails when park_mib is 0");
+    check(c.kept.seq().size() == 5003, "conversation is untouched after failed pre_park");
+    // Verify that the resume behavior still works (same as existing tests)
+    a = a + text(2, 300);
+    check(c.ask(a) == 5003, "a failed pre_park leaves the conversation live, so the extension resumes from it");
+}
+
 }  // namespace
 
 // A long prompt read in one go has more checkpoints due than a conversation keeps.  Only the ones it keeps get a
@@ -314,7 +379,30 @@ void long_read() {
     check(left[1] == six, "which are five of the fifteen inside, beside the one before the prompt's last token");
 }
 
+// What is kept leaves the heap for a temporary file after a release, and reads back the same, before and after its
+// pages leave the process again.  The writer is a thread: the heap goes once it is done and a release follows.
+void spill() {
+    const size_t n = (size_t(3) << 20) + 123;   // not a whole number of pages
+    auto s = std::make_shared<const strata::poly::Spill>(n);
+    uint8_t* heap = s->data();
+    check(heap != nullptr && s->bytes() == n, "a spill has its bytes");
+    for (size_t i = 0; i < n; ++i) heap[i] = (uint8_t) (i * 131 + (i >> 9));
+    std::vector<uint8_t> want(heap, heap + n);
+    s->release();   // hands it to the writer
+    const uint8_t* p = heap;
+    for (int k = 0; k < 500 && p == heap; ++k) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        s->release();   // frees the heap once it is written
+        p = s->data();
+    }
+    check(p != heap, "the heap is let go once the file holds it");
+    check(std::memcmp(p, want.data(), n) == 0, "the file holds the same bytes");
+    s->release();   // the pages the read brought back leave the process
+    check(std::memcmp(s->data(), want.data(), n) == 0, "and reads back the same after its pages left");
+}
+
 int main() {
+    spill();
     for (const int64_t f : {0, 6000, 700}) {   // 700: reads that start and end between checkpoints
         far = f;
         one_conversation();
@@ -331,6 +419,9 @@ int main() {
     }
     quits = 0;
     long_read();
+    pre_park_keeps_live_position();
+    pre_parked_rows_restore_on_switch();
+    pre_park_respects_budget();
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }

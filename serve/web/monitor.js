@@ -1,8 +1,17 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let selected = null, detail = null, pane = "input", records = [], state = null, operating = false, stamp = "", actionError = "";
-let apiKey = sessionStorage.getItem("strata.monitor.key") || "";
+// #142: inside the web app's Requests tab, the app's header, theme and saved API key stand in for this page's own
+let host = null;
+try { if (window.parent !== window) host = parent.document.documentElement; } catch (e) { /* framed by another site */ }
+let apiKey = sessionStorage.getItem("strata.monitor.key") || (host && JSON.parse(localStorage.getItem("strata.apikey") || '""')) || "";
 document.documentElement.dataset.theme = localStorage.getItem("strata.theme") || "dark";
+if (host) {
+  const sync = () => { document.documentElement.dataset.theme = host.dataset.theme; };
+  document.documentElement.classList.add("embedded");
+  sync();
+  new MutationObserver(sync).observe(host, {attributes: true, attributeFilter: ["data-theme"]});
+}
 const seconds = n => typeof n === "number" ? `${n.toFixed(2)} s` : "—";
 const speed = n => typeof n === "number" ? n.toFixed(1) : "—";
 const active = r => !["completed", "error", "disconnected"].includes(r.state);
@@ -91,6 +100,8 @@ async function refresh() {
     list(); if (selected) await showDetail();
     text("updated", `Live · updated ${new Date().toLocaleTimeString()}`);
     if (!operating) notice(actionError);
+    // Update the compressed badge whenever the monitor refreshes.
+    updateCompressedBadge();
   } catch (error) { notice(error.message); text("updated", "Disconnected · retrying"); $("load").disabled = $("unload").disabled = true; }
 }
 
@@ -215,3 +226,63 @@ document.querySelectorAll("[data-pane]").forEach(button => { button.onclick = ()
 $("copy").onclick = async () => { try { await navigator.clipboard.writeText($("content").textContent); text("copy", "Copied"); setTimeout(() => text("copy", "Copy"), 1500); } catch (_) { notice("Clipboard unavailable; select the text to copy it."); } };
 async function poll() { await refresh(); setTimeout(poll, 2000); }
 poll();
+
+// ------------------------------------------------------------------ Compressed badge: local-context compression indicator
+// Shows a "Compressed" badge when the local-context plugin has folded/
+// compressed the current session's context. Checks the local-context debug
+// server (port 8765) and looks for any session with folded===true and
+// chunkCount>0. The badge appears inline with the model state indicator.
+async function checkLocalContextCompression() {
+  try {
+    const res = await fetch("http://127.0.0.1:8765/api/local-context/state", {
+      cache: "no-store",
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    // Show the badge when any session has been compressed (folded with chunks).
+    // The monitor does not track individual sessions, so we check all sessions.
+    const sessions = data.sessions || [];
+    return sessions.some(
+      (s) => s.folded === true && s.chunkCount > 0,
+    );
+  } catch {
+    /* local-context server not running */
+    return false;
+  }
+}
+
+async function updateCompressedBadge() {
+  const compressed = await checkLocalContextCompression();
+  const badge = $("compressed-badge");
+  if (badge) {
+    badge.hidden = !compressed;
+    badge.style.display = compressed ? "" : "none";
+  }
+}
+
+// ------------------------------------------------------------------ Local context debug badge
+let lastCompressionCount = -1;
+async function pollLocalContext() {
+  try {
+    const res = await fetch("http://127.0.0.1:8765/api/local-context/state", {cache:"no-store"});
+    if (!res.ok) return;
+    const state = await res.json();
+    const count = (state.compression || []).length;
+    if (count !== lastCompressionCount) {
+      lastCompressionCount = count;
+      const badge = $("debug-badge");
+      if (count > 0) {
+        badge.textContent = count;
+        badge.hidden = false;
+        badge.style.background = "var(--st-accent-tint)";
+        badge.style.color = "var(--st-accent-text)";
+      } else {
+        badge.hidden = true;
+      }
+    }
+  } catch { /* local-context server not running */ }
+  // Also update the compressed badge from the local-context poll.
+  updateCompressedBadge();
+}
+setInterval(pollLocalContext, 5000);
+pollLocalContext();
