@@ -332,6 +332,7 @@ private:
 struct CacheFlags {
     CacheOptions o;
     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
+    long long pre_park_floor_mib = 1024;  // idle pre-parking leaves this much physical RAM free
     bool park_auto = false;          // --conversation-cache-mib auto: park_mib from the RAM free once loaded
     int idle_s = 5;                  // seconds of engine idle before the cache work happens; 0: never
 };
@@ -369,6 +370,10 @@ struct Session {
         o.admit = [floor = (uint64_t) f.min_free_mib << 20](size_t bytes) {
             return strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes, floor);
         };
+        o.pre_park_admit = [floor = (uint64_t) f.pre_park_floor_mib << 20](size_t bytes) {
+            return strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes, floor);
+        };
+        o.host_available = [] { return strata::core::available_host_bytes(); };
         return o;
     }
 
@@ -1265,6 +1270,9 @@ void usage() {
                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
                  "                         2560)\n"
+                 "  --conversation-cache-pre-park-min-free-mib N\n"
+                 "                         idle pre-parking leaves this much physical RAM free (default 1024); the\n"
+                 "                         switch's park keeps --conversation-cache-min-free-mib\n"
                   "  --conversation-cache-idle-s N       the cache work (pre-parking the current conversation, writing\n"
                   "                         saved rows out) waits until the engine has been idle this long (default\n"
                   "                         5; 0 = at once, the way it was)\n"
@@ -1398,6 +1406,7 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
+        else if (a == "--conversation-cache-pre-park-min-free-mib") cache.pre_park_floor_mib = std::atoll(val());
         else if (a == "--conversation-cache-idle-s") cache.idle_s = std::atoi(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
@@ -1438,7 +1447,7 @@ int main(int argc, char** argv) {
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
-        cache.min_free_mib > most) {
+        cache.min_free_mib > most || cache.pre_park_floor_mib < 0 || cache.pre_park_floor_mib > most) {
         std::fprintf(stderr, "strata-poly: a cache option is negative or too large\n");
         return 2;
     }
