@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,10 @@ struct CacheOptions {
     int park_slots = 4;        ///< parked conversations at most
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
+    std::function<bool(size_t)> pre_park_admit;  ///< the same for the idle pre-park; unset: admit rules it
+    std::function<std::optional<uint64_t>()> host_available;  ///< the host's free bytes now; unset: unknown
+    int64_t pre_park_floor_mib = 1024;  ///< idle pre-parking leaves this much physical RAM free; the switch's
+                                        ///< park is gated by admit alone, which carries the stricter floor
     FILE* log = nullptr;       ///< where parking is reported; the server reads these lines
 };
 
@@ -202,13 +207,39 @@ public:
     /// its last checkpoint, to host memory, the way park() keeps a conversation that is leaving - but without cutting
     /// the conversation: it stays in the engine whole, and a request that goes on from here finds the engine where it
     /// was.  When another conversation later takes the engine, park() then has only the rows read since to copy.
+    // What one idle pre-park saves: an eighth of the budget in tokens, but never more than the host can spare
+    // above the pre-park floor.  No reading (or no host_available): the whole budget eighth, the way it sizes
+    // without telemetry.  Zero: the host has nothing to give.
+    int64_t chunk_tokens() const {
+        const int64_t rb = (int64_t) e_.row_bytes();
+        if (rb < 1) return 0;
+        int64_t bytes = ((int64_t) o_.park_mib << 20) / 8;
+        if (o_.host_available) {
+            const std::optional<uint64_t> avail = o_.host_available();
+            if (avail) {
+                // The spare in bytes, no MiB truncation: what matters is the host's real headroom.
+                const uint64_t floor_bytes = (uint64_t) o_.pre_park_floor_mib << 20;
+                if (*avail < floor_bytes) return 0;
+                bytes = std::min(bytes, (int64_t) (*avail - floor_bytes));
+            }
+        }
+        return bytes / rb;
+    }
+
     bool pre_park() {
         Slot& s = cur();
         if (o_.park_mib < 1 || o_.park_slots < 1 || s.marks.empty() || s.marks.back().pos < o_.park_min) return false;
         const Clock::time_point t0 = Clock::now();
         const int64_t end = s.marks.back().pos, from = saved(s);
         if (from == end) return true;  // nothing to do, no logging
-        return save_rows(cur_, "pre-parked", t0);
+        // One idle tick copies at most an eighth of the budget, and only what the host can spare above the
+        // smaller pre-park floor.  A delta bigger than the host's free RAM is refused whole and retried whole
+        // every tick - the parked copy never advances, and a later switch destroys the engine's copy wholesale
+        // (a 96K-token session then re-reads 92,499 tokens, 76 s).  Bounded chunks pass the gate even on a busy
+        // day; the next tick continues from here.
+        const int64_t cap = chunk_tokens();
+        if (cap < 1) return false;
+        return save_rows(cur_, "pre-parked", t0, from + cap, true);
     }
 
     /// The parked conversations, the bytes they hold, and how many were pushed out so far.
@@ -331,23 +362,36 @@ private:
     // Makes the parked conversations, the current one among them and `extra` bytes more, fit the budget and the
     // slots.  The least recently used goes first, whatever its length: a long conversation can lose its place to
     // several short ones.  Slot `keep` stays; it is the one about to take the engine, if any, so it frees a slot.
-    // False: it does not fit, or the host cannot spare the bytes.
-    bool fit(size_t extra, size_t keep) {
+    // When the host refuses `extra` (the free-RAM gate), a parked conversation is evicted for it too and the check
+    // is retried - the newest parked one stays, so a stale RAM reading cannot wipe the whole shelf.  The idle
+    // pre-park (`pre`) never evicts: its chunk waits for the next tick instead.  False: it does not fit.
+    bool fit(size_t extra, size_t keep, bool pre = false) {
         const size_t budget = (size_t) o_.park_mib << 20;
+        const std::function<bool(size_t)>& admit = pre && o_.pre_park_admit ? o_.pre_park_admit : o_.admit;
         for (;;) {
             const Held h = held(cur_);
             const size_t leaving = keep < slots_.size() && keep != cur_ && !slots_[keep].seq.empty() ? 1 : 0;
-            if (h.bytes + extra <= budget && h.count - leaving <= (size_t) o_.park_slots) break;
-            size_t out = slots_.size();
+            // The idle pre-park (`pre`) saves into the live conversation's own slot: it takes no shelf slot, so the
+            // live conversation does not count against park_slots there (the switch's park then takes one and
+            // evicts for it).  Counting it made every pre-park refuse at once with the shelf full - the state
+            // opencode lives in - and the switch did all the saving one-shot.
+            const size_t shelves = h.count - (pre ? 1 : 0);
+            if (h.bytes + extra <= budget && shelves - leaving <= (size_t) o_.park_slots &&
+                (extra == 0 || !admit || admit(extra)))
+                return true;
+            if (pre) return false;
+            size_t out = slots_.size(), newest = 0;
             for (size_t i = 0; i < slots_.size(); ++i)
-                if (i != cur_ && i != keep && !slots_[i].seq.empty() &&
+                if (i != cur_ && i != keep && !slots_[i].seq.empty() && slots_[i].stamp > newest)
+                    newest = slots_[i].stamp;
+            for (size_t i = 0; i < slots_.size(); ++i)
+                if (i != cur_ && i != keep && !slots_[i].seq.empty() && slots_[i].stamp != newest &&
                     (out == slots_.size() || slots_[i].stamp < slots_[out].stamp))
                     out = i;
             if (out == slots_.size()) return false;
             slots_[out] = Slot{};
             ++evictions_;
         }
-        return extra == 0 || !o_.admit || o_.admit(extra);
     }
 
     // Copies the rows the current conversation still has only in the engine, up to its last checkpoint; what it
@@ -362,14 +406,18 @@ private:
     }
 
     // Copies the rows the current conversation still has only in the engine, up to its last checkpoint, to host
-    // memory.  `label` is what say() prints ("parked" or "pre-parked").  Returns true when the rows are in host
-    // memory (or nothing needed saving), false when the guards or the budget said no.
-    bool save_rows(size_t keep, const char* label, Clock::time_point t0) {
+    // memory.  `label` is what say() prints ("parked" or "pre-parked").  `up_to` caps the copy: the idle
+    // pre-park passes a bound so one attempt stays small enough for the host's free RAM (the switch's park
+    // passes none and saves to the last checkpoint).  Returns true when the rows are in host memory (or nothing
+    // needed saving), false when the guards or the budget said no.
+    bool save_rows(size_t keep, const char* label, Clock::time_point t0, int64_t up_to = INT64_MAX,
+                   bool pre = false) {
         Slot& s = cur();
-        const int64_t end = s.marks.back().pos, from = saved(s);
+        const int64_t from = saved(s);
+        const int64_t end = std::min(s.marks.back().pos, up_to);
         const size_t bytes = (size_t) (end - from) * e_.row_bytes();
         if (from < end) {
-            const BlobPtr b = fit(bytes, keep) ? blob(bytes) : nullptr;
+            const BlobPtr b = fit(bytes, keep, pre) ? blob(bytes) : nullptr;
             if (!b) {
                 say("skipped", end, t0, slots_.size());
                 return false;
@@ -377,7 +425,7 @@ private:
             e_.save_rows(from, end - from, b->data());
             s.rows.push_back({b, from, end - from, end - from});
         }
-        if (!fit(0, keep)) return false;
+        if (!fit(0, keep, pre)) return false;
         say(label, end, t0, cur_);
         return true;
     }

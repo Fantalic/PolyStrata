@@ -352,6 +352,155 @@ void pre_park_respects_budget() {
     check(c.ask(a) == 5003, "a failed pre_park leaves the conversation live, so the extension resumes from it");
 }
 
+// pre_park with a small budget saves bounded chunks (~1/8 of park_mib per tick) so a big conversation's parked copy
+// advances incrementally instead of one too-big blob that the host's free-RAM gate refuses.  With park_mib = 1 the
+// cap is (1 MiB << 20) / 8 / 16 = 8192 tokens at the harness's row_bytes.  The conversation is driven past 2x the
+// cap so the first pre_park saves only ~8192 tokens, the next continues from there, and once coverage reaches
+// marks.back(), park() adds 0 new bytes.  A follow-up ask on the same prefix reuses the full covered prefix.
+void pre_park_bounded_chunks() {
+    CacheOptions o = options(1);  // park_mib = 1, cap = 8192 tokens at row_bytes 16
+    Chat c(o);
+
+    // First prompt: 5000 + 3 reply = 5003, checkpoints at 2048, 4096
+    std::vector<int32_t> a = text(1, 5000);
+    c.ask(a);
+
+    // Second prompt: extend to 20106 (5003 + 15100 + 3 reply), new checkpoint at 20106
+    a = a + text(2, 15100);
+    c.ask(a);
+    check(c.kept.seq().size() == 20106, "conversation is 20106 tokens (5000 + 3 + 15100 + 3)");
+
+    // First pre_park: saves only up to cap (8192 tokens = 131072 bytes)
+    check(c.kept.pre_park(), "first pre_park succeeds");
+    check(c.kept.seq().size() == 20106, "pre_park does not truncate the slot");
+    check((int) c.e.save_rows_bytes == 131072, "first pre_park saves ~8192 tokens (cap * row_bytes)");
+
+    // Second pre_park: continues from 8192, saves another cap-sized chunk (8192 tokens)
+    a = a + text(3, 10000);  // 20106 + 10000 = 30106 prompt tokens + 3 reply = 30109
+    c.ask(a);
+    check(c.kept.seq().size() == 30109, "extended conversation is 30109 tokens (30106 prompt + 3 reply)");
+    check(c.kept.pre_park(), "second pre_park succeeds");
+    const size_t after_second = c.e.save_rows_bytes;
+    check(after_second - (size_t) 131072 == 131072, "second pre_park also saves cap (8192 * 16) bounded chunk");
+
+    // Third pre_park: continues from 16384, saves another cap chunk
+    check(c.kept.pre_park(), "third pre_park succeeds");
+    const size_t after_third = c.e.save_rows_bytes;
+    check(after_third - after_second == 131072, "third pre_park also saves cap (8192 * 16) bounded chunk");
+
+    // Fourth pre_park: continues from 24576, saves remaining to marks.back().pos (30105)
+    check(c.kept.pre_park(), "fourth pre_park succeeds");
+    const size_t after_fourth = c.e.save_rows_bytes;
+    check(after_fourth - after_third == 88464, "fourth pre_park saves remaining (30105-24576)*16 tokens");
+
+    // Once coverage reaches marks.back(), park() adds 0 new bytes
+    std::vector<int32_t> b = text(99, 3000);
+    c.ask(b);  // switches to b, parks a
+    check(c.e.save_rows_bytes == after_fourth, "park() adds 0 new bytes when coverage == marks.back().pos");
+
+    // Come back to a: it resumes at its last checkpoint (30105) - the covered prefix is reused
+    std::vector<int32_t> a2 = a;
+    check(c.ask(a2) == 30105, "switch-back resumes at the last checkpoint (marks.back().pos)");
+    check((int64_t) c.kept.seq().size() == 30112, "switch-back holds the prompt (30109) + 3 reply tokens");
+}
+
+// A full shelf (park_slots parked conversations) plus the live one: the idle pre-park saves into the live
+// conversation's own slot, so it takes no shelf slot and must succeed even with the shelf full.  Counting the
+// live one made every pre-park refuse at once in that state - which opencode always lives in - and the switch
+// then did all the saving one-shot.
+void pre_park_full_shelf() {
+    Chat c(options(64));   // 64 MiB: plenty for five 4000-token conversations at 16 bytes a row
+    std::vector<std::vector<int32_t>> conv;
+    for (int i = 0; i < 5; ++i) conv.push_back(text(10 + i, 4000));
+    c.ask(conv[0]);
+    c.ask(conv[1]);
+    c.ask(conv[2]);
+    c.ask(conv[3]);
+    check(c.kept.parked() == 3, "three conversations are parked while the fourth is live");
+    c.ask(conv[4]);   // the switch parks the fourth: the shelf is full, the fifth is live
+    check(c.kept.parked() == 4, "the shelf is full with the fifth conversation live");
+
+    const size_t before = c.e.save_rows_bytes;
+    check(c.kept.pre_park(), "pre-park succeeds with a full shelf");
+    check(c.e.save_rows_bytes > before, "the live conversation's pre-park saved its rows");
+
+    // Back to the first: the fifth parks, and the pre-park did most of its saving - the switch adds nearly nothing.
+    const size_t at_switch = c.e.save_rows_bytes;
+    c.ask(conv[0]);
+    check(c.e.save_rows_bytes - at_switch < 128, "the switch's park adds nearly nothing after the pre-park");
+    check(c.kept.parked() == 4, "the shelf stays full after the switch");
+}
+
+// When the host refuses the switch's park, the least recently used parked copy is evicted for it - the leaving
+// conversation always gets to park, so its engine copy is not destroyed.  The newest parked copy is spared (a
+// stale RAM reading cannot wipe the shelf), and the idle pre-park never evicts: refused, it waits for the next
+// tick instead.
+void park_evicts_when_host_refuses() {
+    int refuses = 0;
+    CacheOptions o = options(4);
+    o.admit = [&refuses](size_t) {
+        if (refuses) { --refuses; return false; }
+        return true;
+    };
+    Chat c(o);
+
+    // Four conversations, one after another: a, b, c park one by one, d holds the engine.
+    std::vector<int32_t> a = text(1, 5000);
+    c.ask(a);
+    std::vector<int32_t> b = text(2, 5000);
+    check(c.ask(b) == 0, "b starts fresh");
+    std::vector<int32_t> c3 = text(3, 5000);
+    check(c.ask(c3) == 0, "c starts fresh");
+    std::vector<int32_t> d = text(4, 5000);
+    check(c.ask(d) == 0, "d starts fresh");
+    check(c.kept.evictions() == 0, "the host allowed every park so far");
+
+    // The host refuses d's park once: a, the least recently used parked copy, is evicted for it, and d parks.
+    refuses = 1;
+    std::vector<int32_t> e = text(5, 5000);
+    check(c.ask(e) == 0, "e starts fresh");
+    check(c.kept.evictions() == 1, "the refused park evicted the least recently used parked copy");
+
+    // The idle pre-park never evicts: refused, it waits for the next tick instead.
+    refuses = 1;
+    check(!c.kept.pre_park(), "a refused pre-park waits instead of evicting");
+    check(c.kept.evictions() == 1, "the pre-park did not evict");
+    check(c.kept.pre_park(), "the next pre-park, with the host willing, saves");
+
+    // Coming back: a re-reads from its start (it was evicted); b and c resume at their checkpoints.
+    check(c.ask(a) == 0, "the evicted conversation re-reads from its start");
+    check(c.ask(b) > 0, "a parked conversation that stayed resumes at its checkpoint");
+    check(c.ask(c3) > 0, "the spared newest parked conversation resumes at its checkpoint");
+}
+
+// The idle pre-park sizes each chunk to what the host can spare above the smaller pre-park floor: the budget
+// eighth shrinks to the spare, and nothing is saved while the host is at or below the floor.  (host_available is
+// stubbed, so the real machine's RAM plays no role; the admits stay unset, so the gates are inert.)
+void pre_park_spare_sizing() {
+    uint64_t free_bytes = (uint64_t(3) << 20) / 2 + (uint64_t(1) << 20);   // 1.5 MiB free
+    CacheOptions o = options(4);   // the budget's eighth is 512 KiB, 32768 tokens at row_bytes 16
+    o.pre_park_floor_mib = 1;
+    o.host_available = [&free_bytes] { return std::optional<uint64_t>(free_bytes); };
+    Chat c(o);
+
+    std::vector<int32_t> a = text(1, 60000);   // longer than any chunk below
+    c.ask(a);
+
+    // 1.5 free MiB, floor 1 MiB: the spare is 0.5 MiB = 32768 tokens, the same as the budget eighth
+    check(c.kept.pre_park(), "pre-park succeeds while the host has spare above the floor");
+    check(c.e.save_rows_bytes == (size_t) 524288, "the chunk is the spare (32768 tokens), never the whole gap");
+
+    // 1.25 free MiB: the spare is 0.25 MiB, so the next chunk is 16384 tokens
+    free_bytes = (uint64_t(1) << 20) + (uint64_t(1) << 18);
+    check(c.kept.pre_park(), "the next pre-park continues");
+    check(c.e.save_rows_bytes == (size_t) 786432, "the chunk shrinks to the smaller spare (16384 tokens)");
+
+    // 1 free MiB, at the floor: nothing is saved
+    free_bytes = uint64_t(1) << 20;
+    check(!c.kept.pre_park(), "a host at the floor gives nothing");
+    check(c.e.save_rows_bytes == (size_t) 786432, "no bytes were saved at the floor");
+}
+
 }  // namespace
 
 // A long prompt read in one go has more checkpoints due than a conversation keeps.  Only the ones it keeps get a
@@ -422,6 +571,10 @@ int main() {
     pre_park_keeps_live_position();
     pre_parked_rows_restore_on_switch();
     pre_park_respects_budget();
+    pre_park_bounded_chunks();
+    pre_park_full_shelf();
+    pre_park_spare_sizing();
+    park_evicts_when_host_refuses();
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }
