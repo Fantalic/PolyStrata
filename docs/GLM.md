@@ -324,3 +324,34 @@ three formats run within run-to-run scatter of each other (prompt 984.0 / 941.8 
 - Pictures. The model's image input is not read.
 - Several requests decoded together (`"parallel"`). Requests wait their turn.
 - `--prompt-cache-root` and `--turn-token`. Checkpoints are taken by position.
+
+## Building the engine locally on this PC
+
+On this machine the engine is built with `tools\build-poly.ps1` (PowerShell 5.1):
+
+```
+tools\build-poly.ps1                        # incremental build + deploy to engine-poly\
+tools\build-poly.ps1 -Configure             # refresh CMake cache with release flags, then build
+tools\build-poly.ps1 -Tests                 # also build the four offline tests
+tools\build-poly.ps1 -NoDeploy              # build only, no copy to engine-poly\
+```
+
+The script uses the release recipe flags that are mandatory for performance:
+
+- `-DCMAKE_BUILD_TYPE=Release`, built with Ninja — the same generator the release build uses.
+- `-DSTRATA_PORTABLE=ON` — portable CPU code. A non-portable build measured decode at 20.0 tok/s on this
+  machine; the portable release measured 45.5 tok/s (2026-11-14, RTX 30-class card, measured in
+  `.ai/idle-cache-research-findings.md`).
+- `-DSTRATA_GGML_DIR=third_party\llama.cpp` — the pinned submodule checkout. The bare default (unpinned ggml)
+  contributed to the 2x regression.
+- `-DCMAKE_CUDA_ARCHITECTURES=86-real` — targets this machine's GPU (sm_86, Ampere / RTX 30-class); the release
+  script builds every arch from 75 to 120, a local build only needs its own.
+- CUDA 12.6's nvcc is used explicitly (`-DCMAKE_CUDA_COMPILER=...`) to avoid the "No CUDA toolset found"
+  error that can appear with fresh build directories.
+
+The script reuses the existing `build-verify\` directory by default (it is already CMake-configured with these
+flags), so a normal run is incremental — unchanged files are skipped by Ninja. The `-Configure` switch forces a
+full reconfigure.
+
+After build the script backs up the current `engine-poly\strata-poly.exe` to `strata-poly.prev.exe` and copies
+the new one in place, printing size and timestamp.

@@ -26,6 +26,8 @@ offers the same steps as tools.
   `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
 - Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
   measurement.
+- Local Windows build of the strata-poly engine: `tools\build-poly.ps1` (incremental, deploys to
+  `engine-poly\`; `-Configure` to refresh the cache), see [docs/GLM.md](docs/GLM.md).
 
 ## Contributing a change or report
 
