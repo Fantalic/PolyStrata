@@ -36,6 +36,8 @@ struct CacheOptions {
     int64_t park_mib = 0;      ///< host memory for parked conversations; 0: none is parked
     int park_slots = 4;        ///< parked conversations at most
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
+    int focus = 12;            ///< a conversation used within this many requests keeps its parked copy while
+                               ///< any other candidate exists; 0: off (the smallest bank always goes first)
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
     std::function<bool(size_t)> pre_park_admit;  ///< the same for the idle pre-park; unset: admit rules it
     std::function<std::optional<uint64_t>()> host_available;  ///< the host's free bytes now; unset: unknown
@@ -359,6 +361,38 @@ private:
         return h;
     }
 
+    // The bytes this slot's bank holds: its checkpoint states and its saved rows.
+    size_t bank_bytes(size_t i) const {
+        size_t bytes = 0;
+        for (const Checkpoint& m : slots_[i].marks) bytes += m.state ? m.state->bytes() : 0;
+        for (const Rows& r : slots_[i].rows) bytes += r.blob ? r.blob->bytes() : 0;
+        return bytes;
+    }
+
+    // The parked conversation that gives way: the smallest bank first (its rows are the cheapest to
+    // read again), among equals the one not used for longest.  A conversation the client was in within
+    // the last `focus` requests keeps its place while any other candidate exists.  The newest parked
+    // one never goes (a stale RAM reading must not wipe what just parked).  `keep` is a slot the
+    // caller is about to reuse and is spared.  False: every candidate is protected.
+    bool pick_victim(size_t keep, size_t& out) {
+        out = slots_.size();
+        size_t newest = 0;
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (i != cur_ && i != keep && !slots_[i].seq.empty() && slots_[i].stamp > newest)
+                newest = slots_[i].stamp;
+        for (int pass = 0; pass < 2 && out == slots_.size(); ++pass) {
+            for (size_t i = 0; i < slots_.size(); ++i) {
+                const Slot& s = slots_[i];
+                if (i == cur_ || i == keep || s.seq.empty() || s.stamp == newest) continue;
+                if (pass == 0 && o_.focus > 0 && clock_ - s.stamp <= (uint64_t) o_.focus) continue;
+                if (out == slots_.size() || bank_bytes(i) < bank_bytes(out) ||
+                    (bank_bytes(i) == bank_bytes(out) && s.stamp < slots_[out].stamp))
+                    out = i;
+            }
+        }
+        return out != slots_.size();
+    }
+
     // Makes the parked conversations, the current one among them and `extra` bytes more, fit the budget and the
     // slots.  The least recently used goes first, whatever its length: a long conversation can lose its place to
     // several short ones.  Slot `keep` stays; it is the one about to take the engine, if any, so it frees a slot.
@@ -380,15 +414,9 @@ private:
                 (extra == 0 || !admit || admit(extra)))
                 return true;
             if (pre) return false;
-            size_t out = slots_.size(), newest = 0;
-            for (size_t i = 0; i < slots_.size(); ++i)
-                if (i != cur_ && i != keep && !slots_[i].seq.empty() && slots_[i].stamp > newest)
-                    newest = slots_[i].stamp;
-            for (size_t i = 0; i < slots_.size(); ++i)
-                if (i != cur_ && i != keep && !slots_[i].seq.empty() && slots_[i].stamp != newest &&
-                    (out == slots_.size() || slots_[i].stamp < slots_[out].stamp))
-                    out = i;
-            if (out == slots_.size()) return false;
+            // The newest parked one stays, so a stale RAM reading cannot wipe the whole shelf.
+            size_t out;
+            if (!pick_victim(keep, out)) return false;
             slots_[out] = Slot{};
             ++evictions_;
         }
@@ -400,7 +428,7 @@ private:
         Slot& s = cur();
         if (o_.park_mib < 1 || o_.park_slots < 1 || s.marks.empty() || s.marks.back().pos < o_.park_min) return false;
         const Clock::time_point t0 = Clock::now();
-        const int64_t end = s.marks.back().pos, from = saved(s);
+        const int64_t end = s.marks.back().pos;
         cut(s, end);
         return save_rows(keep, "parked", t0);
     }
@@ -413,32 +441,51 @@ private:
     bool save_rows(size_t keep, const char* label, Clock::time_point t0, int64_t up_to = INT64_MAX,
                    bool pre = false) {
         Slot& s = cur();
-        const int64_t from = saved(s);
+        const int64_t rb = e_.row_bytes();
+        const int64_t from0 = saved(s);
+        int64_t from = from0;
         const int64_t end = std::min(s.marks.back().pos, up_to);
-        const size_t bytes = (size_t) (end - from) * e_.row_bytes();
-        if (from < end) {
-            const BlobPtr b = fit(bytes, keep, pre) ? blob(bytes) : nullptr;
-            if (!b) {
-                say("skipped", end, t0, slots_.size());
-                return false;
+        if (from < end && rb > 0) {
+            // The switch's park used to be one blob of the whole delta; a long conversation could not be
+            // banked (the allocation or the free-RAM gate refused it) and was lost whole, so its next turn
+            // re-read everything.  Bank the delta in bounded chunks instead - an eighth of the budget each,
+            // the rule the idle pre-park sizes by - and stop at the first chunk the guards refuse.  What
+            // earlier chunks banked stays: a partial park keeps the conversation's prefix, and the client
+            // re-reads only the tail beyond it.
+            const int64_t cap = o_.park_mib > 0 ? ((int64_t) o_.park_mib << 20) / 8 / rb : 0;
+            while (from < end && cap > 0) {
+                const int64_t to = std::min(end, from + cap);
+                const size_t bytes = (size_t) (to - from) * rb;
+                const BlobPtr b = fit(bytes, keep, pre) ? blob(bytes) : nullptr;
+                if (!b) break;
+                e_.save_rows(from, to - from, b->data());
+                s.rows.push_back({b, from, to - from, to - from});
+                from = to;
+                say(label, to, t0, cur_);
             }
-            e_.save_rows(from, end - from, b->data());
-            s.rows.push_back({b, from, end - from, end - from});
+        }
+        if (from == from0 && from < end) {
+            say("skipped", end, t0, slots_.size());
+            return false;
         }
         if (!fit(0, keep, pre)) return false;
-        say(label, end, t0, cur_);
+        if (from == from0) say(label, end, t0, cur_);
         return true;
     }
 
-    // An empty slot other than `keep`.
+    // An empty slot other than `keep`; when none is free, the least valuable parked conversation goes,
+    // by the same rule fit() uses.
     size_t take(size_t keep) {
-        size_t out = slots_.size();
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            if (i == keep) continue;
-            if (slots_[i].seq.empty()) return i;
-            if (out == slots_.size() || slots_[i].stamp < slots_[out].stamp) out = i;
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (i != keep && slots_[i].seq.empty()) return i;
+        size_t out;
+        if (!pick_victim(keep, out)) {
+            out = slots_.size();
+            for (size_t i = 0; i < slots_.size(); ++i)
+                if (i != keep && (out == slots_.size() || slots_[i].stamp < slots_[out].stamp)) out = i;
+            if (out == slots_.size()) return out;   // nothing to give (should not happen)
         }
-        slots_[out] = Slot{};   // park() left one empty, so this is not reached
+        slots_[out] = Slot{};
         ++evictions_;
         return out;
     }

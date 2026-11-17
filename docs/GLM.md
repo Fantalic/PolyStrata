@@ -236,6 +236,19 @@ short request took turns. Every later turn of the first two had 97.8 to 99.2% of
 What it costs: a checkpoint is 153 MB of RAM, and a parked conversation takes 28 KB for each token. At the end of
 that run two parked conversations held 1.1 GB.
 
+Who gives way when the budget or the slots are full: the smallest parked conversation first - its rows are the
+cheapest to read again - and among equals the one not used for longest. `--conversation-cache-focus N` spares a
+conversation the client was in within the last N requests, so the session the user works in keeps its parked copy
+while any other candidate exists. The newest parked conversation never goes. `--conversation-cache-min-tokens N`
+keeps short side requests out of the cache entirely: they read again in about 2 s, but they no longer evict
+anything.
+
+Measured 2026-11-17 on the RTX 3060 Ti (Qwen3.6-35B-A3B, a 20,480 MiB budget, slots 12, min-tokens 16384, focus
+12): a 47,095-token conversation came back after four short side requests with its bank restored in 0.12-0.18 s,
+and its prompt lines read 28672 tokens reused of 39,023-47,095. No evictions in the whole run. With the older
+rule - oldest parked first, whatever its length - the same machine logged 2,187 evictions in six hours, and every
+switch back to the big session read the whole prompt again in 65-90 s.
+
 The API reports what was not read again as `usage.prompt_tokens_details.cached_tokens` (Responses:
 `input_tokens_details.cached_tokens`, Messages: `cache_read_input_tokens`), and the web app's Monitor has a
 Conversation cache card.
@@ -274,10 +287,13 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--cpu-share F` | as the times say | in a batch of fewer tokens than `--stage-ahead`, the share of the experts outside VRAM that the CPU computes while the others are copied: the ones the fewest tokens chose; 0 = none |
 | `--prompt-cache N` | 6 | checkpoints kept of a conversation; 0 = only a next turn is not read again |
 | `--prompt-cache-every N` | 2048 | a checkpoint every N prompt tokens, besides the one at a prompt's end; 0 = none |
-| `--conversation-cache-mib N` | 0 | RAM for parked conversations; 0 = off |
+| `--conversation-cache-mib N` | 0 | RAM for parked conversations; 0 = off; `auto` = 40% of the RAM free once the model is loaded, at most 8192 |
 | `--conversation-cache-slots N` | 4 | parked conversations at most |
 | `--conversation-cache-min-tokens N` | 1024 | a shorter conversation is not parked |
 | `--conversation-cache-min-free-mib N` | 2560 | park only while this much physical RAM stays free |
+| `--conversation-cache-pre-park-min-free-mib N` | 1024 | idle pre-parking leaves this much physical RAM free; the switch's park keeps `--conversation-cache-min-free-mib` |
+| `--conversation-cache-idle-s N` | 5 | the cache work (pre-parking the current conversation, writing saved rows out) waits until the engine has been idle this long; 0 = at once |
+| `--conversation-cache-focus N` | 12 | a conversation used within this many requests keeps its parked copy while any other candidate exists; 0 = off |
 | `--eos-ids ID,ID,...` | from the GGUF | tokens that end a reply |
 | `--tail-skip N` | 0; setup gives Qwen3.6 6 | an expert outside VRAM that every token of a window ranks at place N+1 or later among its experts is left out: faster, and the answers move a little |
 | `STRATA_FREEZE_EXPERTS` | not set | hold the split of the routed experts between the card and the CPU still for the engine's whole run, so a greedy answer is a function of the request alone: same request, same answer, bit for bit. With guesses on (`--window` above 1 and a block or `--lookup`) the block's guesses and their windows still take their sizes from the machine's pace, which the freeze does not hold: on the cards measured so far it repeated with them on (RX 9060 XT, several thread counts and loads) and on one RTX 4070 laptop it did not — add `--window 1` for a repeat wherever the guesses are on. Measured cost: nothing measurable on the default path, 4-7% at a short prompt with the freeze set |

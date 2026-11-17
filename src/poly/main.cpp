@@ -1276,6 +1276,8 @@ void usage() {
                   "  --conversation-cache-idle-s N       the cache work (pre-parking the current conversation, writing\n"
                   "                         saved rows out) waits until the engine has been idle this long (default\n"
                   "                         5; 0 = at once, the way it was)\n"
+                  "  --conversation-cache-focus N        a conversation used within this many requests keeps its parked copy\n"
+                  "                         while any other candidate exists (default 12; 0: off)\n"
                   "  --batch N              N answers written together, each in a sequence of its own with its own\n"
                   "                         state and attention rows (default 0 = one at a time; at most 8);\n"
                  "                         --slots N is the same\n"
@@ -1408,6 +1410,7 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
         else if (a == "--conversation-cache-pre-park-min-free-mib") cache.pre_park_floor_mib = std::atoll(val());
         else if (a == "--conversation-cache-idle-s") cache.idle_s = std::atoi(val());
+        else if (a == "--conversation-cache-focus") cache.o.focus = std::atoi(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());

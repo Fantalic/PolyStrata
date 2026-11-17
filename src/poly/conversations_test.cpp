@@ -146,6 +146,7 @@ CacheOptions options(int64_t park_mib, int slots = 4) {
     o.every = 2048;
     o.park_mib = park_mib;
     o.park_slots = slots;
+    o.focus = 0;
     return o;
 }
 
@@ -550,6 +551,146 @@ void spill() {
     check(std::memcmp(s->data(), want.data(), n) == 0, "and reads back the same after its pages left");
 }
 
+// Chunked switch-park, full success: a conversation whose unsaved delta spans several budget-eighth chunks
+// (small park_mib, row_bytes 16).  Bank the delta in bounded chunks and assert all rows are banked.
+void switch_park_chunked_full() {
+    // park_mib = 1, cap = (1 << 20) / 8 / 16 = 8192 tokens per chunk
+    CacheOptions o = options(1);
+    o.admit = [](size_t) { return true; };  // always allow
+    Chat c(o);
+
+    // First prompt: 30000 tokens + 3 reply = 30003 tokens.
+    // Checkpoints at 2048, 4096, ..., 28672, 29999 (last token).
+    // park() calls cut(s, marks.back().pos=29999) -> seq has 29999 tokens.
+    // Delta = 29999 rows * 16 bytes = 479984 bytes. cap = 8192 tokens = 131072 bytes.
+    // 479984 / 131072 = 3.66 -> 4 chunks (8192+8192+8192+5425).
+    std::vector<int32_t> a = text(1, 30000);
+    c.ask(a);
+
+    // Clear counters: we'll measure what the switch parks.
+    c.e.save_rows_calls = 0;
+    c.e.save_rows_bytes = 0;
+
+    // Switch to a new conversation -> parks a.
+    std::vector<int32_t> b = text(2, 1000);
+    check(c.ask(b) == 0, "b starts fresh, a is parked");
+
+    // All chunks banked.
+    check(c.e.save_rows_calls == 4,
+          "park saved in 4 chunks (29999 tokens / 8192 cap)");
+    check((int) c.kept.parked_bytes() == 29999 * 16 + 48,
+          "parked_bytes == row bytes + 6 checkpoints * 8 bytes");
+}
+
+// Partial park: same setup, but admit allows only the first call.  Assert park returns true,
+// exactly one chunk banked, the conversation survives in its slot with its prefix.
+void switch_park_partial() {
+    CacheOptions o = options(1);
+    int admit_calls = 0;
+    o.admit = [&admit_calls](size_t) {
+        if (admit_calls == 0) { ++admit_calls; return true; }
+        return false;  // only the first call admits
+    };
+    Chat c(o);
+
+    // 30000 tokens -> 4 chunks needed, but only the first is admitted.
+    std::vector<int32_t> a = text(1, 30000);
+    c.ask(a);
+
+    c.e.save_rows_calls = 0;
+    c.e.save_rows_bytes = 0;
+
+    // Switch: park tries chunks, first succeeds, second fails -> partial park.
+    std::vector<int32_t> b = text(2, 1000);
+    check(c.ask(b) == 0, "b starts fresh");
+
+    check(c.e.save_rows_calls == 1, "park saved exactly 1 chunk");
+    // parked_bytes includes checkpoint blobs (6 * 8 = 48 bytes); subtract them to get row bytes
+    check((int) (c.kept.parked_bytes() - c.kept.parked() * 6 * 8) == 8192 * 16,
+          "parked row bytes == one chunk (8192 * 16)");
+
+    // The original conversation survives in its slot.
+    // Switch back to a: it resumes at the checkpoint position (29999), not from 0.
+    std::vector<int32_t> a2 = a;
+    const int64_t from_a = c.ask(a2);
+    check(from_a > 0,
+          "switch back to a resumes at the checkpoint (not 0)");
+    check(from_a == 29999,
+          "resume position == the checkpoint (29999)");
+}
+
+// Nothing banked: admit always false.  Assert park returns false and the old conversation
+// is evicted (matches old skip semantics).
+void switch_park_nothing_banked() {
+    CacheOptions o = options(1);
+    o.admit = [](size_t) { return false; };  // always refuse
+    Chat c(o);
+
+    std::vector<int32_t> a = text(1, 30000);
+    c.ask(a);
+
+    c.e.save_rows_calls = 0;
+    c.e.save_rows_bytes = 0;
+
+    // Switch: park fails, conversation is evicted.
+    std::vector<int32_t> b = text(2, 1000);
+    check(c.ask(b) == 0, "b starts fresh, a was evicted");
+    check(c.kept.parked_bytes() == 0, "no bytes parked");
+}
+
+// With focus off (the default), the smallest bank goes first: a fresh small parked copy is
+// evicted before an older bigger one. Three parked conversations are needed so that the newest
+// (other) is spared, leaving big and small as candidates; small's bank is the smallest so it
+// is the victim.
+void evict_smallest_first() {
+    CacheOptions o = options(64, 3);  // 4 slots (park_slots=3)
+    o.focus = 0;
+    Chat c(o);
+    std::vector<int32_t> big = text(1, 5000), small = text(2, 1000);
+    c.ask(big);          // big current (slot 0)
+    c.ask(small);        // big parked (slot 0), small current (slot 1)
+    std::vector<int32_t> other = text(3, 2000);
+    c.ask(other);        // small parked (slot 1), other current (slot 2)
+    std::vector<int32_t> next = text(4, 2000);
+    c.ask(next);         // other parked (slot 2), next current (slot 3)
+    // Now: slot 0 = big (parked, old), slot 1 = small (parked, newer), slot 2 = other (parked, newest)
+    std::vector<int32_t> more = text(5, 2000);
+    c.ask(more);         // needs a slot: other parks, fit() evicts - newest is other (spared),
+                         // candidates are big and small; small's bank is smallest → evicted
+    check(c.ask(big) > 0, "the older bigger bank survived eviction");
+    check(c.ask(small) == 0, "the smallest bank was evicted: it is read again from 0");
+}
+
+// With focus on, a recently-used bank keeps its place while an older candidate exists: the old
+// bigger bank is the victim even though the fresh one is smaller.
+//
+// clock_ increments in resume() (line 68 of conversations.hpp): constructor=1, then each ask++.
+// We park big, small, filler, filler2, then ask small again so its stamp is recent (clock_=9).
+// Then ask more: fit() evicts. clock_=10, focus=3:
+// With focus on, a fresh small bank is spared while an unfocused candidate exists: the eviction
+// takes the older medium bank even though the fresh one is smaller.  With focus off the smallest
+// bank (the fresh one) would go instead - this test pins the focus behavior.
+void evict_respects_focus() {
+    CacheOptions o = options(64, 2);
+    o.focus = 2;
+    o.park_min = 0;
+    Chat c(o);
+    std::vector<int32_t> medium = text(1, 3000), filler = text(4, 1500), small = text(2, 1000);
+    check(c.ask(medium) == 0, "medium starts fresh");
+    check(c.ask(filler) == 0, "filler parks");
+    check(c.ask(small) == 0, "small parks: all slots full");
+    std::vector<int32_t> fresh = text(3, 1500);
+    // medium: stamp 1, clock_ = 4, 4-1 = 3 > focus(2) → out of focus
+    // filler: stamp 2, clock_ = 4, 4-2 = 2 <= focus(2) → in focus
+    // small:  stamp 3, clock_ = 4, 4-3 = 1 <= focus(2) → in focus
+    // pass-0: filler and small are in focus → skipped. medium out of focus → candidate.
+    // victim = medium (only out-of-focus candidate). fresh takes medium's slot.
+    check(c.ask(fresh) == 0, "fresh parks: medium evicted (out of focus, only candidate)");
+    check(c.kept.evictions() == 1, "one eviction (medium)");
+    check(c.ask(medium) == 0, "evicted medium re-read from 0");
+    check(c.ask(small) > 0, "in-focus small spared, resumes at checkpoint");
+}
+
 int main() {
     spill();
     for (const int64_t f : {0, 6000, 700}) {   // 700: reads that start and end between checkpoints
@@ -575,6 +716,11 @@ int main() {
     pre_park_full_shelf();
     pre_park_spare_sizing();
     park_evicts_when_host_refuses();
+    switch_park_chunked_full();
+    switch_park_partial();
+    switch_park_nothing_banked();
+    evict_smallest_first();
+    evict_respects_focus();
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }
