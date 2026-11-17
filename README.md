@@ -2,6 +2,12 @@
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Türkçe](README.tr.md)
 
+> **This is a fork.** This repository is [Fantalic's fork](https://github.com/Fantalic/PolyStrata) of
+> [PolyStrata](https://github.com/VecSzn/PolyStrata) by [VecSzn](https://github.com/VecSzn), which is built on
+> [Strata](https://github.com/Niko1221/Strata) by [Niko1221](https://github.com/Niko1221). Everything below
+> describes PolyStrata as its author made it; [What is different in this fork](#what-is-different-in-this-fork)
+> lists the changes this fork carries.
+
 <p align="center"><b>Run large AI models on your own PC</b><br>
 Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V and Kolibri 1 · free and open source</p>
 
@@ -55,6 +61,29 @@ The server can change between installed models while it runs ([how](docs/BACKEND
 PolyStrata was created by [VecSzn](https://github.com/VecSzn).
 PolyStrata is built on [Strata](https://github.com/Niko1221/Strata) by Niko1221.
 Why it is a separate repo, AMD and smaller cards, fine-tunes and other questions: [FAQ](docs/FAQ.md).
+
+## What is different in this fork
+
+This fork is maintained for one PC's daily use and its own experiments. The changes on top of PolyStrata:
+
+- **The conversation cache works while the engine is idle.** Between requests the engine pre-parks the current
+  conversation in bounded chunks, each passing the free-RAM gate, instead of parking only when another
+  conversation wants the engine.
+- **A park that hits the budget banks what fits.** A switch keeps the part that was written out instead of
+  dropping the whole conversation.
+- **The cache evicts the smallest parked bank first, with a focus pin.** The rows that are cheapest to read again
+  go first; a conversation used within the last `--conversation-cache-focus N` requests (new flag, default 12,
+  0 = off) keeps its parked copy while any other candidate exists. Measured on an RTX 3060 Ti (Qwen3.6-35B-A3B,
+  a 20,480 MiB budget): a 47,095-token session came back after four short side requests with its bank restored in
+  0.12-0.18 s and 28,672 of its 39,023-47,095 prompt tokens reused, and no evictions - the old oldest-first rule
+  logged 2,187 evictions in six hours on the same machine
+  ([docs/GLM.md](docs/GLM.md#several-conversations-at-once)).
+- **A queue and web UI for agents that take turns:** session bundles bind a sub-agent's requests to its main
+  session, single requests can be paused and resumed, the request queue can be reordered by drag-and-drop, paused
+  and played on, shown compressed, and vision can be switched on and off while the server runs.
+- **A local Windows build of the engine:** [tools/build-poly.ps1](tools/build-poly.ps1) builds the strata-poly
+  engine on this PC with the release recipe
+  ([docs/GLM.md](docs/GLM.md#building-the-engine-locally-on-this-pc)).
 
 ## How fast is it?
 
