@@ -2433,6 +2433,7 @@ class Vision:
             args += ["--max-tokens", str(cfg["max_tokens"])]
         if cfg.get("min_tokens"):                       # #767: mtmd's image_min_tokens (a hand-edited key)
             args += ["--min-tokens", str(cfg["min_tokens"])]
+        self.max_size = self.max_size_of(cfg.get("max_size"))   # opt-in: pictures larger than this box are scaled down
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.proc = None
@@ -2563,12 +2564,54 @@ class Vision:
             return False
 
     @staticmethod
-    def normalize(data: bytes) -> bytes:
+    def max_size_of(value) -> tuple[int, int] | None:
+        """The vision section's "max_size": [W, H] or "WxH" (e.g. [2560, 1440]), or None when it is not set."""
+        if value in (None, "", 0, False):
+            return None
+        try:
+            w, h = (value.lower().split("x") if isinstance(value, str) else value)
+            w, h = int(w), int(h)
+        except (TypeError, ValueError):
+            raise ValueError(f'the vision section\'s "max_size" {value!r}: give [width, height], e.g. [2560, 1440]') \
+                from None
+        if w < 1 or h < 1:
+            raise ValueError(f'the vision section\'s "max_size" {value!r}: both sides must be at least 1')
+        return w, h
+
+    @staticmethod
+    def fit(size: tuple[int, int], box: tuple[int, int] | None) -> tuple[int, int] | None:
+        """The size a `size` picture is scaled down to so it fits `box` either way round (its long side within the
+        box's long side, its short side within the short one, the aspect ratio kept), or None when it fits as it
+        is.  [2560, 1440] takes 3840x2160 to 2560x1440 and a 1440x3200 phone screenshot to 1152x2560."""
+        w, h = size
+        if not box or w < 1 or h < 1:
+            return None
+        s = min(max(box) / max(w, h), min(box) / min(w, h))
+        return None if s >= 1 else (max(1, round(w * s)), max(1, round(h * s)))
+
+    @staticmethod
+    def _too_big(data: bytes, box: tuple[int, int] | None) -> bool:
+        """Whether a picture is larger than `box` (read from its header).  False without Pillow or for a file
+        Pillow cannot read: the image then goes through as it was, and the encoder's max_tokens still caps it."""
+        if not box:
+            return False
+        try:
+            import io
+            from PIL import Image
+            with Image.open(io.BytesIO(data)) as im:
+                return Vision.fit(im.size, box) is not None
+        except Exception:  # noqa: BLE001 - any failure leaves the image as it was sent
+            return False
+
+    @staticmethod
+    def normalize(data: bytes, max_size: tuple[int, int] | None = None) -> bytes:
         """The formats strata-vision's decoder (stb_image) reads pass through; anything else is converted to PNG.
-        A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow)."""
+        A JPEG with an EXIF Orientation other than 1 is turned upright first (needs Pillow).  `max_size` (the
+        vision section's "max_size", opt-in): a picture larger than that box either way round is scaled down to
+        fit it (Lanczos, aspect ratio kept) and passed on as a PNG; one that fits is untouched."""
         jpeg = data[:3] == b"\xff\xd8\xff"
-        if (jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or \
-                data[:6] in (b"GIF87a", b"GIF89a"):
+        if ((jpeg and not Vision._exif_rotated(data)) or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:2] == b"BM" or
+                data[:6] in (b"GIF87a", b"GIF89a")) and not Vision._too_big(data, max_size):
             return data
         try:
             import io
@@ -2590,6 +2633,9 @@ class Vision:
             im = bg
         elif im.mode != "RGB":
             im = im.convert("RGB")
+        smaller = Vision.fit(im.size, max_size)
+        if smaller is not None:
+            im = im.resize(smaller, Image.LANCZOS)
         out = io.BytesIO()
         im.save(out, format="PNG")
         return out.getvalue()
@@ -2608,7 +2654,9 @@ class Vision:
     def encode(self, source: str | bytes, keep=()) -> tuple[Path, int]:
         """-> (embeddings file, number of image tokens).  `source`: what load() reads, or the image's bytes.
         `keep`: files the caller still needs (never evicted by this call)."""
-        data = self.normalize(source if isinstance(source, bytes) else self.load(source))
+        raw = source if isinstance(source, bytes) else self.load(source)
+        box = getattr(self, "max_size", None)
+        data = self.normalize(raw, box) if box else self.normalize(raw)
         key = hashlib.sha256(data).hexdigest()[:32]
         with self.lock:
             if key in self.cache:

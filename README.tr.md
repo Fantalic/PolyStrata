@@ -5,6 +5,8 @@
 <p align="center"><b>Büyük yapay zekâ modellerini kendi bilgisayarında çalıştır</b><br>
 Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V ve Kolibri 1 · ücretsiz ve açık kaynak</p>
 
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img height="28" alt="Used by Linger" src="docs/media/used-by-linger.svg"></a></p>
+
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="Yanıt yazarken saniyede token: 8 GB kartlı bir dizüstünde Qwen3.6-35B-A3B ile 94 ila 100, bir RTX 5090'da 394 ila 395"></p>
 
 <p align="center"><img src="docs/media/claude-code-demo.gif" width="820" alt="Bir terminalde Claude Code ve yanında PolyStrata'nın API Monitor ekranı"><br>
@@ -17,9 +19,6 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Cl
 PolyStrata, normalde bir sunucu gerektiren büyük yapay zekâ modellerini sıradan bir bilgisayarda çalıştırır. Bu
 modeller sohbet eder, kod yazar, uygulamaların ve kodlama ajanlarınla birlikte çalışır. Hiçbir veri bilgisayarından
 dışarı çıkmaz.
-
-[Linger](https://github.com/simplexai-labs/linger), bilgisayarında yerel olarak çalışan açık kaynaklı kişisel bir ajandır.
-Yerel modelleri PolyStrata üzerinde çalışır.
 
 İki motor üzerinde on iki model çalıştırır:
 
@@ -257,6 +256,8 @@ On iki modelin hepsi aynı şekilde kullanılır: aynı uygulama, aynı API.
 
 - **Tarayıcıda:** `http://127.0.0.1:8080` adresini aç. Uygulamada **Chat**, modeli ve GPU/CPU/RAM kullanımını canlı
   gösteren **Monitor** ve ayarlarla adresleri gösteren **About** sekmeleri var.
+- **Kişisel ajan olarak:** [Linger](https://github.com/simplexai-labs/linger)'i indir: [Mac (Apple Silicon)](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-macos-arm64.dmg) ·
+  [Windows](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-windows-x64-setup.exe) · [Linux](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-linux-x64.tar.gz).
 - **Uygulamaların ve kodlama ajanların:** temel URL'si **`http://127.0.0.1:8080/v1`** olan "OpenAI-compatible" bir
   sağlayıcı ekle. Herhangi bir API anahtarı ve herhangi bir model adı çalışır.
   - Anthropic'in API'sini kullanan uygulamalar: `http://127.0.0.1:8080/v1/messages` (Claude Code:
@@ -325,6 +326,17 @@ var. PolyStrata, **işi tüm bilgisayarına paylaştırarak** modeli sığdırı
 şeyler tezgâhta durur, geri kalanı kilerde bekler.
 
 Her modelin diyagramı ve nasıl çalıştığı: [docs/HOW_IT_WORKS_MODELS.md](docs/HOW_IT_WORKS_MODELS.md).
+
+## PolyStrata üzerine kurulanlar
+
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img src="https://raw.githubusercontent.com/simplexai-labs/linger/main/assets/linger-story.webp" width="820" alt="28 saniyede Linger: yerel bir model kurar, uygulamalarını bağlar, e-postaları ve toplantıları hafızaya dönüştürür ve bir e-posta göndermeden önce sorar."></a><br>
+<sub>28 saniyede Linger: yerel bir model kurar, uygulamalarını bağlar, e-postaları ve toplantıları hafızaya dönüştürür ve bir e-posta göndermeden önce sorar.</sub></p>
+
+**[Linger](https://github.com/simplexai-labs/linger)**, tamamen kendi bilgisayarında çalışan açık kaynaklı kişisel bir ajandır; yerel modelleri
+PolyStrata üzerinde çalışır. Uygulamaların arasında ihtiyacın olanı bulur, önemli olanı hatırlar ve sen yokken
+işleri ilerletir. [Belgeler](https://docs.heylinger.com/) · [GitHub](https://github.com/simplexai-labs/linger)
+
+PolyStrata üzerine bir şey mi geliştirdin? Bir [issue](https://github.com/simplexai-labs/PolyStrata/issues) aç, buraya ekleyelim.
 
 ## Emeği geçenler ve lisans
 

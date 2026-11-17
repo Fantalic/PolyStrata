@@ -1655,6 +1655,18 @@ models want at least 1,024 for grounding tasks (pointing, counting small items);
 and no minimum, because a larger minimum changes the image answers and costs encode time (about 3 s at 300 tokens on
 8 cores, in proportion to the tokens).
 
+**A largest picture size (opt-in):** `"max_size": [W, H]` (or `"WxH"`) in the `"vision"` section scales a picture
+larger than that box down to fit it before the encoder reads it. The box fits either way round: a picture's long side
+must fit the box's long side and its short side the short one, so `[2560, 1440]` takes a 3840x2160 screenshot to
+2560x1440, a 1440x3200 phone screenshot to 1152x2560 and a 3440x1440 ultrawide one to 2560x1072. The aspect ratio is
+kept, the scaling is Pillow's Lanczos, and the result goes to the encoder as a PNG. A picture that fits, and every
+picture when the key is not set, goes through as before. mtmd's `max_tokens` is a pixel budget instead (32x32 pixels
+a token for Qwen-VL), so a box of W x H wants `"max_tokens"` of at least W x H / 1024 (3,600 for 2560x1440), or the
+encoder scales the picture down again. Without Pillow the key does nothing. Measured with Tiel Coder 35B-A3B's BF16
+encoder on an i9-9980HK, 8 threads: 2560x1440 (3,600 tokens) encodes in about 138 s, 1920x1080 (2,040) in about
+52 s and 800x450 in about 5 s. The same picture sent again, as an agent does with its history, takes about 1 s,
+because the encoder's cache and the conversation cache both hold it.
+
 **A Q8_0 encoder (#625):** `"mmproj"` in the `"vision"` section can point to another mmproj file of this model, for
 example a Q8_0 one (llama.cpp's `convert_hf_to_gguf.py --mmproj --outtype q8_0` makes one): the encoder's library
 reads quantized weights, the file is smaller (590 MiB against 865 MiB for the BF16 one, from `llama-quantize

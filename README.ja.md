@@ -5,6 +5,8 @@
 <p align="center"><b>大きな AI モデルを、手元の PC で動かす</b><br>
 Qwen3.8-Flash-Next、GLM 5.3 Flash、DeepSeek V4 Flash、LFM2.5、Flint、Qwen3.6、Clover、Ornith 1.5、Gemma 4、Tiel Coder、MiniCPM-V、Kolibri 1 · 無料のオープンソース</p>
 
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img height="28" alt="Used by Linger" src="docs/media/used-by-linger.svg"></a></p>
+
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="回答を書く速さ（トークン/秒）：8 GB のノート PC で Qwen3.6-35B-A3B は 94〜100、RTX 5090 で 394〜395"></p>
 
 <p align="center"><img src="docs/media/claude-code-demo.gif" width="820" alt="ターミナルの Claude Code と、その横の PolyStrata の API Monitor"><br>
@@ -16,9 +18,6 @@ Qwen3.8-Flash-Next、GLM 5.3 Flash、DeepSeek V4 Flash、LFM2.5、Flint、Qwen3.
 
 PolyStrata は、ふつうはサーバーが必要な大きな AI モデルを普通の PC で動かします。チャットをしたり、コードを書いたり、
 アプリやコーディングエージェントと連携したりできます。データが PC の外に出ることはありません。
-
-[Linger](https://github.com/simplexai-labs/linger) は、あなたのコンピューターでローカルに動くオープンソースのパーソナルエージェントです。
-そのローカルモデルは PolyStrata で動いています。
 
 動かせるモデルは 12 個で、エンジンは 2 つです。
 
@@ -232,6 +231,8 @@ PolyStrata のインストール、起動、停止もできます。
 
 - **ブラウザーで：** `http://127.0.0.1:8080` を開きます。**Chat**、モデルと GPU/CPU/RAM の様子をリアルタイムで見る **Monitor**、
   設定とアドレスが載った **About** があります。
+- **パーソナルエージェントとして：** [Linger](https://github.com/simplexai-labs/linger) をダウンロード：[Mac（Apple シリコン）](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-macos-arm64.dmg) ·
+  [Windows](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-windows-x64-setup.exe) · [Linux](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-linux-x64.tar.gz)。
 - **アプリやコーディングエージェントから：** 「OpenAI-compatible」プロバイダーを追加し、ベース URL に
   **`http://127.0.0.1:8080/v1`** を指定します。API キーとモデル名は何でもかまいません。
   - Anthropic の API を使うアプリ：`http://127.0.0.1:8080/v1/messages`（Claude Code：
@@ -289,6 +290,15 @@ PolyStrata のインストール、起動、停止もできます。
 いつも使う道具は調理台に置き、残りは食料庫にしまっておきます。
 
 各モデルの図と説明：[docs/HOW_IT_WORKS_MODELS.ja.md](docs/HOW_IT_WORKS_MODELS.ja.md)。
+
+## PolyStrata で作られたプロジェクト
+
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img src="https://raw.githubusercontent.com/simplexai-labs/linger/main/assets/linger-story.webp" width="820" alt="28 秒でわかる Linger：ローカルモデルを用意し、アプリをつなぎ、メールや会議を記憶に変え、メールを送る前に確認します。"></a><br>
+<sub>28 秒でわかる Linger：ローカルモデルを用意し、アプリをつなぎ、メールや会議を記憶に変え、メールを送る前に確認します。</sub></p>
+
+**[Linger](https://github.com/simplexai-labs/linger)** は、PC の中だけで動くオープンソースのパーソナルエージェントです。ローカルモデルは PolyStrata で動きます。アプリをまたいで必要なものを見つけ、大事なことを覚え、あなたがいない間も作業を進めます。[ドキュメント](https://docs.heylinger.com/) · [GitHub](https://github.com/simplexai-labs/linger)
+
+PolyStrata で何か作りましたか？ [issue](https://github.com/simplexai-labs/PolyStrata/issues) を開いてください。ここに追加します。
 
 ## クレジットとライセンス
 

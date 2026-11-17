@@ -5,6 +5,8 @@
 <p align="center"><b>在你自己的电脑上运行大型 AI 模型</b><br>
 Qwen3.8-Flash-Next、GLM 5.3 Flash、DeepSeek V4 Flash、LFM2.5、Flint、Qwen3.6、Clover、Ornith 1.5、Gemma 4、Tiel Coder、MiniCPM-V 和 Kolibri 1 · 免费开源</p>
 
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img height="28" alt="Used by Linger" src="docs/media/used-by-linger.svg"></a></p>
+
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="写回答时每秒的 token 数：8 GB 显存的笔记本上 Qwen3.6-35B-A3B 为 94 到 100，RTX 5090 上为 394 到 395"></p>
 
 <p align="center"><img src="docs/media/claude-code-demo.gif" width="820" alt="终端里的 Claude Code，旁边是 PolyStrata 的 API Monitor"><br>
@@ -16,8 +18,6 @@ Qwen3.8-Flash-Next、GLM 5.3 Flash、DeepSeek V4 Flash、LFM2.5、Flint、Qwen3.
 
 PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它们能聊天、写代码，还能配合你的应用和编程智能体一起工作。
 所有数据都留在你的电脑上。
-
-[Linger](https://github.com/simplexai-labs/linger) 是一个开源的个人智能体，在你的电脑上本地运行。它的本地模型跑在 PolyStrata 上。
 
 它能跑十二个模型，用两个引擎：
 
@@ -218,6 +218,8 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 
 - **在浏览器里：** 打开 `http://127.0.0.1:8080`。里面有 **Chat**（聊天）、实时 **Monitor**（监控模型和你的
   GPU/CPU/内存），以及 **About**（设置和地址）。
+- **作为你的个人智能体：** 下载 [Linger](https://github.com/simplexai-labs/linger)：[Mac（Apple 芯片）](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-macos-arm64.dmg) ·
+  [Windows](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-windows-x64-setup.exe) · [Linux](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-linux-x64.tar.gz)。
 - **你的应用和编程智能体：** 添加一个“OpenAI 兼容”的提供商，base URL 填 **`http://127.0.0.1:8080/v1`**。
   API key 和模型名随便填都行。
   - 使用 Anthropic API 的应用：`http://127.0.0.1:8080/v1/messages`（Claude Code：
@@ -273,6 +275,15 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 **把工作分摊到整台电脑上**。可以想象一个厨房：常用的东西放在台面上，其余的放在储藏室里。
 
 每个模型的原理图和说明：[docs/HOW_IT_WORKS_MODELS.zh-CN.md](docs/HOW_IT_WORKS_MODELS.zh-CN.md)。
+
+## 基于 PolyStrata 构建
+
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img src="https://raw.githubusercontent.com/simplexai-labs/linger/main/assets/linger-story.webp" width="820" alt="28 秒看懂 Linger：它装好本地模型、连上你的应用，把邮件和会议变成记忆，发邮件前先问你。"></a><br>
+<sub>28 秒看懂 Linger：它装好本地模型、连上你的应用，把邮件和会议变成记忆，发邮件前先问你。</sub></p>
+
+**[Linger](https://github.com/simplexai-labs/linger)** 是一个开源的个人智能体，完全在你的电脑上运行，本地模型跑在 PolyStrata 上。它能在你的各个应用里找到你要的东西，记住重要的事，在你不在的时候把事情做完。[文档](https://docs.heylinger.com/) · [GitHub](https://github.com/simplexai-labs/linger)
+
+你也基于 PolyStrata 做了东西？开一个 [issue](https://github.com/simplexai-labs/PolyStrata/issues)，我们会把它加到这里。
 
 ## 致谢与许可证
 

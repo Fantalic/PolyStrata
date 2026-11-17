@@ -5,6 +5,8 @@
 <p align="center"><b>Große KI-Modelle auf deinem eigenen PC</b><br>
 Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V und Kolibri 1 · kostenlos und Open Source</p>
 
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img height="28" alt="Used by Linger" src="docs/media/used-by-linger.svg"></a></p>
+
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens pro Sekunde beim Schreiben einer Antwort: 94 bis 100 mit Qwen3.6-35B-A3B auf einem Laptop mit 8-GB-Karte, 394 bis 395 auf einer RTX 5090"></p>
 
 <p align="center"><img src="docs/media/claude-code-demo.gif" width="820" alt="Claude Code im Terminal neben dem API Monitor von PolyStrata"><br>
@@ -16,9 +18,6 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Cl
 
 PolyStrata lässt große KI-Modelle auf einem normalen PC laufen, Modelle, die sonst meist einen Server brauchen.
 Sie chatten, schreiben Code und arbeiten mit deinen Apps und Coding-Agents zusammen. Nichts verlässt deinen PC.
-
-[Linger](https://github.com/simplexai-labs/linger) ist ein persönlicher Open-Source-Agent, der lokal auf deinem Computer läuft.
-Seine lokalen Modelle laufen auf PolyStrata.
 
 Es lässt zwölf Modelle laufen, auf zwei Engines:
 
@@ -249,6 +248,8 @@ Alle zwölf Modelle benutzt du gleich: dieselbe App, dieselbe API.
 
 - **Im Browser:** Öffne `http://127.0.0.1:8080`. Dort gibt es **Chat**, einen Live-**Monitor** für das Modell und
   deine GPU/CPU/RAM und **About** mit den Einstellungen und Adressen.
+- **Als persönlicher Agent:** Lade [Linger](https://github.com/simplexai-labs/linger) für [Mac (Apple Silicon)](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-macos-arm64.dmg) ·
+  [Windows](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-windows-x64-setup.exe) · [Linux](https://github.com/simplexai-labs/linger/releases/download/desktop-v0.1.2/Linger-0.1.2-linux-x64.tar.gz) herunter.
 - **Deine Apps und Coding-Agents:** Füge einen „OpenAI-kompatiblen“ Anbieter mit der Basis-URL
   **`http://127.0.0.1:8080/v1`** hinzu. Jeder API-Key und jeder Modellname funktioniert.
   - Apps, die die API von Anthropic nutzen: `http://127.0.0.1:8080/v1/messages` (Claude Code:
@@ -309,6 +310,17 @@ Modelle wie dieses laufen normalerweise auf Servern mit Hunderten Gigabyte Grafi
 eine Küche vor: Was du ständig brauchst, bleibt auf der Arbeitsfläche, der Rest wartet in der Vorratskammer.
 
 Bild und Erklärung für jedes Modell: [docs/HOW_IT_WORKS_MODELS.de.md](docs/HOW_IT_WORKS_MODELS.de.md).
+
+## Auf PolyStrata gebaut
+
+<p align="center"><a href="https://github.com/simplexai-labs/linger"><img src="https://raw.githubusercontent.com/simplexai-labs/linger/main/assets/linger-story.webp" width="820" alt="Linger in 28 Sekunden: Er richtet ein lokales Modell ein, verbindet deine Apps, macht aus Mails und Meetings Erinnerungen und fragt, bevor er eine E-Mail sendet."></a><br>
+<sub>Linger in 28 Sekunden: Er richtet ein lokales Modell ein, verbindet deine Apps, macht aus Mails und Meetings Erinnerungen und fragt, bevor er eine E-Mail sendet.</sub></p>
+
+**[Linger](https://github.com/simplexai-labs/linger)** ist ein persönlicher Open-Source-Agent, der ganz auf deinem PC läuft; seine lokalen
+Modelle laufen auf PolyStrata. Er findet in deinen Apps, was du brauchst, merkt sich, was wichtig ist, und erledigt
+Dinge, während du weg bist. [Doku](https://docs.heylinger.com/) · [GitHub](https://github.com/simplexai-labs/linger)
+
+Du hast etwas auf PolyStrata gebaut? Öffne ein [Issue](https://github.com/simplexai-labs/PolyStrata/issues), dann nehmen wir es hier auf.
 
 ## Danksagung und Lizenz
 

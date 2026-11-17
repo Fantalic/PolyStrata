@@ -947,6 +947,25 @@ def say(msg=""):
     print(msg, flush=True)
 
 
+def colours() -> bool:
+    """Whether the menus may print ANSI colours: stdout is a terminal that takes them and NO_COLOR is not set.  A
+    Windows console prints the escape codes as text ("<-[36m") until virtual terminal processing is turned on for
+    it, which this does; a console that refuses (before Windows 10 1511) gets none."""
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return False
+    if not WIN:
+        return os.environ.get("TERM") != "dumb"
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        out = k32.GetStdHandle(-11)                    # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        return bool(k32.GetConsoleMode(out, ctypes.byref(mode))
+                    and k32.SetConsoleMode(out, mode.value | 0x0004))   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def step(n, title):
     say()
     say(f"=== Step {n}: {title} ===")
@@ -6802,13 +6821,15 @@ def poly_tail_skip(cfg: dict, cfg_path: Path | None = None) -> None:
 def poly_kv_whole(cfg: dict, cfg_path: Path | None = None) -> None:
     """A config of strata-poly on an AMD card gets --kv-whole: ROCm keeps the VRAM that cuMemUnmap() and
     cuMemRelease() gave back (issue #13), so the attention caches take theirs at load instead of as the
-    conversation grows, where the expert cache's VRAM would be lost to them.  A config that has it keeps it."""
+    conversation grows, where the expert cache's VRAM would be lost to them.  A config that has it keeps it.  A config
+    with --vram-pool is left as it is: the pool keeps the card's VRAM for the whole run and moves it between the caches,
+    so nothing is given back to ROCm, and --kv-whole would take the whole context's VRAM from the experts at load."""
     a = cfg["args"]
     try:
         meta = json.loads((Path(cfg["exe"]).parent / "BUILD.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    if meta.get("backend") != "hip" or "--kv-whole" in a:
+    if meta.get("backend") != "hip" or "--kv-whole" in a or "--vram-pool" in a:
         return
     a.append("--kv-whole")
     ok("AMD card: --kv-whole, the attention caches take their VRAM at load (ROCm keeps what the expert cache gives "
@@ -8209,18 +8230,20 @@ def main() -> int:
     # ---- 2. the questions
     step(2, "your choices")
     fams = menu_families(hip)
+    coloured = colours()
+    cyan, reset = ("\033[36m", "\033[0m") if coloured else ("", "")
     if a.family:
         family = a.family
     else:
         rec_fam = STRIX_HALO_FAMILY if strix_halo_recommends(gpu, ram) and STRIX_HALO_FAMILY in fams else fams[0]
         for i, f in enumerate(fams, 1):
             d = FAMILIES[f]
-            say(f"  {i}) {d['title']:20s} {d['by']} - {d['about']}" + ("   [experimental]" if d.get("experimental") else "")
+            say(f"  {i}) {cyan}{d['title']:20s}{reset} {d['by']} - {d['about']}" + ("   [experimental]" if d.get("experimental") else "")
                 + family_menu_note(f, hip, gpu, avx2, avx512)
                 + (f"   (recommended for Strix Halo: {STRIX_HALO_MODEL})" if f == rec_fam and rec_fam != fams[0] else ""))
         for j, f in enumerate(OWN_PATH_FAMILIES, len(fams) + 1):   # families with an engine path of their own
             d = OWN_PATH_FAMILIES[f]
-            say(f"  {j}) {d['title']:20s} {d['by']} - {d['about']}   [new]")
+            say(f"  {j}) {cyan}{d['title']:20s}{reset} {d['by']} - {d['about']}   [new]")
         allf = fams + list(OWN_PATH_FAMILIES)
         family = allf[int(ask("Which model?", [str(i) for i in range(1, len(allf) + 1)],
                               str(allf.index(rec_fam) + 1), a.yes)) - 1]
@@ -8267,7 +8290,10 @@ def main() -> int:
         if low_ram_needed(m, ram) and low_ram_fits(m, ram, low_ram_vram(gpu)) and a.low_ram != "off":
             fit = (f"   <- fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, low_ram_vram(gpu)):.0f}%, "
                    + ("the rest in RAM)" if low_ram_resident(m, ram, low_ram_vram(gpu)) else "the rest from the SSD)"))
-        say(f"  {i}) {m:8s}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
+        label = f"{m:8s}"
+        if coloured:
+            label = f"\033[35m{label}\033[0m"
+        say(f"  {i}) {label}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
     rec = str(names.index(installed or recommended_size(family, names, ram)) + 1)
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
     budget, q4_split = None, False
