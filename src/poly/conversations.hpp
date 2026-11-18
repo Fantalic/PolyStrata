@@ -241,14 +241,14 @@ public:
     /// its last checkpoint, to host memory, the way park() keeps a conversation that is leaving - but without cutting
     /// the conversation: it stays in the engine whole, and a request that goes on from here finds the engine where it
     /// was.  When another conversation later takes the engine, park() then has only the rows read since to copy.
-    // A small chunk: a quarter of the budget in tokens, so that banking in every idle moment stays tiny —
-    // a request that arrives mid-copy interrupts within one small chunk (~tens of ms).  No reading (or no
-    // host_available): the whole budget quarter, the way it sizes without telemetry.  Zero: the host has
-    // nothing to give.
+    // A chunk is an eighth of the budget in tokens: big enough that a 64K-token conversation banks in
+    // one piece, small enough that a request arriving mid-banking interrupts within one chunk.  The
+    // idle loop (main.cpp) banks chunks back-to-back through the whole idle moment, so the pacing
+    // comes from the loop, not from the chunk size.
     int64_t chunk_tokens() const {
         const int64_t rb = (int64_t) e_.row_bytes();
         if (rb < 1) return 0;
-        int64_t bytes = ((int64_t) o_.park_mib << 20) / 32;
+        int64_t bytes = ((int64_t) o_.park_mib << 20) / 8;
         if (o_.host_available) {
             const std::optional<uint64_t> avail = o_.host_available();
             if (avail) {
