@@ -124,7 +124,7 @@ struct Chat {
             ids.push_back(t);
         }
         check(e.holds(ids) && kept.seq() == ids, "the engine holds the prompt and the reply");
-        kept.release();   // between requests, as the server does: what comes back is read from the file cache
+        kept.relieve();   // between requests, as the server does: with the shelf's RAM cap set, what comes back is read from the file cache
         return from;
     }
 };
@@ -147,6 +147,7 @@ CacheOptions options(int64_t park_mib, int slots = 4) {
     o.park_mib = park_mib;
     o.park_slots = slots;
     o.focus = 0;
+    o.shelf_ram_mib = 1;
     return o;
 }
 
@@ -691,6 +692,58 @@ void evict_respects_focus() {
     check(c.ask(small) > 0, "in-focus small spared, resumes at checkpoint");
 }
 
+// A parked conversation the client has not used for longer than the TTL is dropped by drop_stale(); a
+// recently used one and the current one stay.
+void drop_stale_by_ttl() {
+    CacheOptions o = options(64, 4);  // 5 slots (park_slots=4)
+    o.park_min = 0;
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 1000), b = text(2, 1000), c2 = text(3, 1000);
+    // Park two conversations: a parks (slot 0), b parks (slot 1)
+    c.ask(a);        // a current (slot 0)
+    c.ask(b);        // a parked (slot 0), b current (slot 1)
+    c.ask(c2);       // b parked (slot 1), c2 current (slot 2)
+    // Now: slot 0 = a (parked, used just now), slot 1 = b (parked, used just now), slot 2 = c2 (current)
+    check(c.kept.drop_stale(60) == 0, "nothing is stale yet (both were just used)");
+    // Age slot 0's used backwards: a is now 120 seconds old
+    c.kept.set_slot_used(0, std::chrono::steady_clock::now() - std::chrono::seconds(120));
+    check(c.kept.drop_stale(60) == 1, "the stale parked conversation a is dropped");
+    check(c.kept.parked() == 1, "only b remains parked (c2 is current)");
+    check(c.ask(a) == 0, "the dropped conversation a is read again from 0");
+    check(c.ask(b) > 0, "the fresh parked conversation b survived");
+    check(c.kept.drop_stale(60) == 0, "the current conversation never drops");
+}
+
+// With no RAM cap (the default), relieve() is a no-op: a parked bank stays in the heap and no file is
+// written - the resume reads the heap, and what the shelf cannot hold is dropped at the park instead.
+void relieve_off_by_default() {
+    CacheOptions o = options(64, 2);
+    o.shelf_ram_mib = 0;
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 5000);
+    check(c.ask(a) == 0, "a starts fresh");
+    check(strata::poly::spill_heap_bytes() > 0, "the parked bank stays in the heap: nothing was written to a file");
+    std::vector<int32_t> b = text(2, 2000);
+    check(c.ask(b) == 0, "b starts fresh, a parks");
+    check(c.ask(a) > 0, "a resumes from its heap bank, not from 0");
+}
+
+// Past the cap, relieve() sends the oldest unfocused parked banks to their files (their heap frees) and
+// spares the focused one: it stays in the heap while the old one reaches its file.
+void relieve_spares_focused() {
+    CacheOptions o = options(64, 2);
+    o.shelf_ram_mib = 1;     // always past the cap: everything eligible gets written
+    o.focus = 4;
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 4000), b = text(2, 4000);
+    check(c.ask(a) == 0, "a starts fresh");
+    check(c.ask(b) == 0, "b starts fresh, a parks");
+    std::vector<int32_t> d = text(3, 2000);
+    check(c.ask(d) == 0, "d starts fresh, b parks: relieve writes the old a, the fresh b is focused");
+    check(c.ask(b) > 0, "the focused bank b resumes at its checkpoint (heap or file)");
+    check(c.ask(a) > 0, "the written bank a resumes at its checkpoint from its file");
+}
+
 int main() {
     spill();
     for (const int64_t f : {0, 6000, 700}) {   // 700: reads that start and end between checkpoints
@@ -721,6 +774,9 @@ int main() {
     switch_park_nothing_banked();
     evict_smallest_first();
     evict_respects_focus();
+    drop_stale_by_ttl();
+    relieve_off_by_default();
+    relieve_spares_focused();
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }

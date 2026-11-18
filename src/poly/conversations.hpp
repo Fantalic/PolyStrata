@@ -38,6 +38,9 @@ struct CacheOptions {
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
     int focus = 12;            ///< a conversation used within this many requests keeps its parked copy while
                                ///< any other candidate exists; 0: off (the smallest bank always goes first)
+    int64_t shelf_ram_mib = 0; ///< the parked banks may hold this much heap before the oldest of them go to
+                               ///< their files; 0 (the default): no bank is ever written - the shelf is RAM
+                               ///< only and what does not fit is dropped at the park
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
     std::function<bool(size_t)> pre_park_admit;  ///< the same for the idle pre-park; unset: admit rules it
     std::function<std::optional<uint64_t>()> host_available;  ///< the host's free bytes now; unset: unknown
@@ -79,6 +82,7 @@ public:
             e_.load_state(state_at(cur(), at), at);
         }
         cur().stamp = clock_;
+        cur().used = Clock::now();
         return at;
     }
 
@@ -205,17 +209,46 @@ public:
         }
     }
 
+    /// Between requests and in the idle tick: with the shelf allowed to spill (shelf_ram_mib > 0), a heap
+    /// past that cap sends its oldest parked banks to their files - a bank on its file holds no RAM.  A
+    /// shelf_ram_mib of 0 (the default) parks nothing but RAM: this is a no-op and no file is ever made.
+    /// The bank in the engine and the focused ones (used within `focus` requests) are spared - the copy
+    /// falls to the next candidate instead.
+    void relieve() const {
+        if (o_.shelf_ram_mib <= 0) return;
+        const size_t cap = (size_t) o_.shelf_ram_mib << 20;
+        if (spill_heap_bytes() <= cap) return;
+        size_t moved = 0;
+        std::vector<size_t> order;   // the parked slots, oldest first
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (i != cur_ && !slots_[i].seq.empty()) order.push_back(i);
+        std::sort(order.begin(), order.end(),
+                  [this](size_t a, size_t b) { return slots_[a].stamp < slots_[b].stamp; });
+        for (const size_t i : order) {
+            if (spill_heap_bytes() <= cap) break;
+            if (o_.focus > 0 && clock_ - slots_[i].stamp <= (uint64_t) o_.focus) continue;
+            for (const Checkpoint& m : slots_[i].marks) m.state->release();
+            for (const Rows& r : slots_[i].rows) r.blob->release();
+            ++moved;
+        }
+        if (moved && o_.log)
+            std::fprintf(o_.log, "conversation cache: relieved %zu banks to their files for the heap cap; "
+                                 "parked=%d bytes=%lld heap=%lld MiB\n", moved, parked(),
+                                 (long long) parked_bytes(), (long long) (spill_heap_bytes() >> 20));
+    }
+
     /// Between requests, when the engine is idle: copy what the current conversation holds only in the engine, up to
     /// its last checkpoint, to host memory, the way park() keeps a conversation that is leaving - but without cutting
     /// the conversation: it stays in the engine whole, and a request that goes on from here finds the engine where it
     /// was.  When another conversation later takes the engine, park() then has only the rows read since to copy.
-    // What one idle pre-park saves: an eighth of the budget in tokens, but never more than the host can spare
-    // above the pre-park floor.  No reading (or no host_available): the whole budget eighth, the way it sizes
-    // without telemetry.  Zero: the host has nothing to give.
+    // A small chunk: a quarter of the budget in tokens, so that banking in every idle moment stays tiny —
+    // a request that arrives mid-copy interrupts within one small chunk (~tens of ms).  No reading (or no
+    // host_available): the whole budget quarter, the way it sizes without telemetry.  Zero: the host has
+    // nothing to give.
     int64_t chunk_tokens() const {
         const int64_t rb = (int64_t) e_.row_bytes();
         if (rb < 1) return 0;
-        int64_t bytes = ((int64_t) o_.park_mib << 20) / 8;
+        int64_t bytes = ((int64_t) o_.park_mib << 20) / 32;
         if (o_.host_available) {
             const std::optional<uint64_t> avail = o_.host_available();
             if (avail) {
@@ -234,11 +267,12 @@ public:
         const Clock::time_point t0 = Clock::now();
         const int64_t end = s.marks.back().pos, from = saved(s);
         if (from == end) return true;  // nothing to do, no logging
-        // One idle tick copies at most an eighth of the budget, and only what the host can spare above the
+        // One idle tick copies at most a quarter of the budget, and only what the host can spare above the
         // smaller pre-park floor.  A delta bigger than the host's free RAM is refused whole and retried whole
         // every tick - the parked copy never advances, and a later switch destroys the engine's copy wholesale
         // (a 96K-token session then re-reads 92,499 tokens, 76 s).  Bounded chunks pass the gate even on a busy
-        // day; the next tick continues from here.
+        // day; the next tick continues from here.  The idle banking loop (when the shelf can spill) calls
+        // pre_park() back-to-back; a request that arrives interrupts within one small chunk.
         const int64_t cap = chunk_tokens();
         if (cap < 1) return false;
         return save_rows(cur_, "pre-parked", t0, from + cap, true);
@@ -248,6 +282,36 @@ public:
     size_t parked() const { return held(slots_.size()).count; }
     size_t parked_bytes() const { return held(slots_.size()).bytes; }
     size_t evictions() const { return evictions_; }
+
+    // Test hook: set the `used` time of a parked slot to age it past the TTL.
+    void set_slot_used(size_t i, std::chrono::steady_clock::time_point tp) { slots_[i].used = tp; }
+
+    // Drops the parked conversations the client has not used for `ttl_s` seconds — a session that ended long ago
+    // left behind.  Runs in the idle tick, so nothing is waiting: a drop is free and a session that returns
+    // anyway just reads its prompt again.  The current conversation never goes.  Returns how many were dropped.
+    size_t drop_stale(long long ttl_s) {
+        if (ttl_s <= 0) return 0;
+        const Clock::time_point now = Clock::now();
+        size_t n = 0;
+        int64_t tokens = 0;
+        for (size_t i = 0; i < slots_.size(); ++i) {
+            Slot& s = slots_[i];
+            if (i == cur_ || s.seq.empty() || s.used == Clock::time_point{}) continue;
+            if (ms_since(s.used) < (double) ttl_s * 1000.0) continue;
+            tokens += len(s);
+            s = Slot{};
+            ++n;
+        }
+        if (n && o_.log) {
+            const Held h = held(cur_);
+            stale_drops_ += n;
+            std::fprintf(o_.log,
+                         "strata-poly: conversation cache: dropped %zu stale conversations (%lld tokens idle over %lld s); parked=%zu bytes=%zu evictions=%zu heap=%lld MiB\n",
+                         n, (long long) tokens, ttl_s, h.count, h.bytes, evictions_,
+                         (long long) (spill_heap_bytes() >> 20));
+        }
+        return n;
+    }
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -269,6 +333,7 @@ private:
         std::vector<Checkpoint> marks;  // by position
         std::vector<Rows> rows;         // back to back from row 0; a parked conversation has all of its rows
         uint64_t stamp = 0;
+        Clock::time_point used{};        // wall-clock time of the last turn — age for the idle-age TTL drop
     };
     struct Held {
         size_t count = 0, bytes = 0;
@@ -278,6 +343,7 @@ private:
     const Slot& cur() const { return slots_[cur_]; }
     static int64_t len(const Slot& s) { return (int64_t) s.seq.size(); }
     static int64_t saved(const Slot& s) { return s.rows.empty() ? 0 : s.rows.back().first + s.rows.back().keep; }
+    static double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
     static int64_t common(const std::vector<int32_t>& a, const std::vector<int32_t>& b) {
         size_t n = 0;
@@ -528,14 +594,17 @@ private:
         return true;
     }
 
-    // `with` is the current slot when its conversation is the one just parked.
+    // `with` is the current slot when its conversation is the one just parked.  The heap figure is what the
+    // process really holds for the banks right now (spill.hpp): bytes= counts their logical size, and a bank
+    // that reached its file holds no heap at all - a heap figure that stays high while parked= falls says the
+    // writes are not getting through.
     void say(const char* what, int64_t tokens, Clock::time_point t0, size_t with) const {
         if (!o_.log) return;
         const Held h = held(with);
         std::fprintf(o_.log,
-                     "strata-poly: conversation cache: %s %lld tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu\n",
+                     "strata-poly: conversation cache: %s %lld tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu heap=%lld MiB\n",
                      what, (long long) tokens, std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
-                     h.count, h.bytes, evictions_);
+                     h.count, h.bytes, evictions_, (long long) (spill_heap_bytes() >> 20));
     }
 
     E& e_;
@@ -544,6 +613,7 @@ private:
     size_t cur_ = 0;
     uint64_t clock_ = 0;
     size_t evictions_ = 0;
+    size_t stale_drops_ = 0;     // conversations dropped by the idle-age TTL
     std::vector<Checkpoint> due_;   // inside()'s checkpoints, until read() makes them the conversation's
     std::vector<int64_t> after_;    // where the conversation's checkpoints are once that read is done
     int64_t turn_ = -1;             // turn_at()'s place in the prompt being read; -1: none

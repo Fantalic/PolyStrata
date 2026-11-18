@@ -73,3 +73,5 @@ build-vision-cuda12.bat
 
 # local Windows HIP packaging output
 dist-hip/
+# agents scratch space (never commit)
+.ai/

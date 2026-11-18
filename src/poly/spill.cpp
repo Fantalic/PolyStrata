@@ -151,14 +151,76 @@ void bring_in(const uint8_t* p, size_t n) {
     for (std::thread& t : more) t.join();
 }
 
+// The heap bytes banks hold, so the cache's log lines can say what the process really holds for them: the
+// parked figure counts the banks' logical size, and a bank that reached its file holds no heap at all.
+std::atomic<int64_t>& heap_bytes() {
+    static std::atomic<int64_t> n{0};
+    return n;
+}
+
 }  // namespace
 
-Spill::Spill(size_t bytes) : n_(bytes) { heap_ = new (std::nothrow) uint8_t[bytes]; }
+int64_t spill_heap_bytes() { return heap_bytes().load(std::memory_order_relaxed); }
+
+// The files a dead engine left behind: its machine lost power, or it was torn down so abruptly that
+// Windows' delete-on-close never ran.  Their name carries the PID of the engine that made them
+// (make_file), so every strata-poly-*.tmp whose PID is not a live process is junk.  Called once at
+// startup, before this process has made any of its own.  POSIX needs nothing: its files are nameless
+// or unlinked from the moment they are made.
+std::pair<int, uint64_t> sweep_orphan_temp_files() {
+#ifdef _WIN32
+    wchar_t dir[MAX_PATH + 1];
+    if (!GetTempPathW(MAX_PATH, dir)) return {0, 0};
+    WIN32_FIND_DATAW fd;
+    const HANDLE find = FindFirstFileW((std::wstring(dir) + L"strata-poly-*.tmp").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return {0, 0};
+    int n = 0;
+    uint64_t bytes = 0;
+    do {
+        wchar_t* end = nullptr;
+        const unsigned long pid = std::wcstoul(fd.cFileName + 12, &end, 10);   // past "strata-poly-"
+        if (!end || *end != L'-' || pid == 0 || pid == GetCurrentProcessId()) continue;
+        // A live process owns the name - even one that merely reused the PID - so its files stay.
+        const HANDLE alive = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD) pid);
+        if (alive) {
+            CloseHandle(alive);
+            continue;
+        }
+        const std::wstring path = std::wstring(dir) + fd.cFileName;
+        LARGE_INTEGER size{};
+        const HANDLE f = CreateFileW(path.c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) {
+            if (GetFileSizeEx(f, &size)) bytes += (uint64_t) size.QuadPart;
+            CloseHandle(f);
+        }
+        if (DeleteFileW(path.c_str())) ++n;
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return {n, bytes};
+#else
+    return {0, 0};
+#endif
+}
+
+Spill::Spill(size_t bytes) : n_(bytes) {
+    heap_ = new (std::nothrow) uint8_t[bytes];
+    if (heap_) heap_bytes().fetch_add((int64_t) bytes, std::memory_order_relaxed);
+}
+
+// Frees the heap copy and takes its bytes off the counter; every path that drops heap_ goes through here.
+void Spill::unheap() const {
+    if (!heap_) return;
+    heap_bytes().fetch_sub((int64_t) n_, std::memory_order_relaxed);
+    delete[] heap_;
+    heap_ = nullptr;
+}
 
 // The file and its mapping go on the writer's thread: the close lets go of the file's pages and its disk blocks, which
 // a request on its way in need not wait for.
 Spill::~Spill() {
-    delete[] heap_;
+    unheap();
     if (file_ == -1) return;
     writer().add([view = view_, n = n_, mapping = mapping_, file = file_] {
 #ifdef _WIN32
@@ -188,8 +250,7 @@ void Spill::release() const {
     used_ = false;
     if (heap_) {
         if (filed_) {   // written out while a request used it
-            delete[] heap_;
-            heap_ = nullptr;
+            unheap();
         } else if (!queued_ && n_ > 0) {
             queued_ = true;
             writer().add([s = shared_from_this()] { s->write(); });
@@ -202,25 +263,36 @@ void Spill::release() const {
 // Nothing writes or frees the heap while it is queued and not filed: it is read without the lock.  A file that
 // cannot be made or written leaves it in the heap, and it is not tried again.
 // STRATA_NO_SPILL keeps every blob on the heap instead (parking still works; RAM use grows accordingly).
+// A write waits for the engine's idle window: the server asks for 250 ms, and a busy stretch of requests
+// that close together never opens the window.  No forced copy: a write waits for its quiet window as
+// long as it takes (STRATA_SPILL_MAX_WAIT_MS to change it by hand; 0 waits forever).
+static long long spill_max_wait_ms() {
+    if (const char* v = std::getenv("STRATA_SPILL_MAX_WAIT_MS")) {
+        const long long n = std::atoll(v);
+        if (n >= 0) return n;
+    }
+    return 0;
+}
+
 void Spill::write() const {
     if (const char* v = std::getenv("STRATA_NO_SPILL")) {
         const int n = std::atoi(v);
         if (n != 0) return;
     }
-    SpillGate::instance().wait_for_idle();
+    SpillGate::instance().wait_for_idle(nullptr, nullptr, spill_max_wait_ms());
     const intptr_t f = make_file();
     const bool ok = f != -1 && write_all(f, heap_, n_);
     std::lock_guard<std::mutex> l(m_);
     if (!ok) {
         if (f != -1) close_file(f);
+        // The heap is kept and the write is handed to the next release() again: once it was never retried,
+        // and one failed write held the bank's RAM for the rest of the run.
+        queued_ = false;
         return;
     }
     file_ = f;
     filed_ = true;
-    if (!used_) {
-        delete[] heap_;
-        heap_ = nullptr;
-    }
+    if (!used_) unheap();
 }
 
 void Spill::map() const {
@@ -262,27 +334,33 @@ void SpillGate::idle() {
 }
 
 bool SpillGate::wait_for_idle(const std::function<bool()>& probe,
-                              const std::function<bool()>& condition) const {
+                              const std::function<bool()>& condition,
+                              long long max_wait_ms) const {
+    const long long started = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch()).count();
     for (;;) {
         if (probe) {
             if (probe()) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        if (idle_seconds_.load(std::memory_order_relaxed) == 0) return true;
-        if (condition) {
+        } else if (idle_seconds_.load(std::memory_order_relaxed) == 0) {
+            return true;
+        } else if (condition) {
             if (condition()) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        if (!busy_.load(std::memory_order_acquire) &&
+        } else if (!busy_.load(std::memory_order_acquire) &&
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
                     .count() -
                 idle_since_.load(std::memory_order_acquire) >=
             idle_seconds_.load(std::memory_order_relaxed) * 1000LL) {
             return true;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        // The cap: a window that a busy server never opens must not hold the writes back forever.
+        if (max_wait_ms > 0 &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                    .count() - started >= max_wait_ms)
+            return true;
     }
 }
 

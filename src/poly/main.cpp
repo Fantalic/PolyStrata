@@ -1,4 +1,4 @@
-// src/poly/main.cpp - strata-poly: GLM 5.3 Flash from its GGUF.
+﻿// src/poly/main.cpp - strata-poly: GLM 5.3 Flash from its GGUF.
 //
 //   strata-poly --model M.gguf --tokens 1,2,3 [--max-new N]   one prompt; prints the generated ids
 //   strata-poly --model M.gguf --serve                        the line protocol serve/server.py speaks
@@ -335,6 +335,8 @@ struct CacheFlags {
     long long pre_park_floor_mib = 1024;  // idle pre-parking leaves this much physical RAM free
     bool park_auto = false;          // --conversation-cache-mib auto: park_mib from the RAM free once loaded
     int idle_s = 5;                  // seconds of engine idle before the cache work happens; 0: never
+    long long idle_ms = 0;           // 0: the idle tick waits idle_s whole seconds
+    long long ttl_s = 0;             // idle-age TTL: drop parked conversations not used for this many seconds
 };
 
 struct Session {
@@ -776,7 +778,7 @@ int serve(Session& ss) {
     // The idle window: after the last request, the cache's work (pre-parking the current conversation) waits
     // until the engine has been idle for the idle seconds - a request that arrives sooner pays none of it.
     Clock::time_point idle_t0 = Clock::now();
-    const long long idle_ms = (long long) ss.flags.idle_s * 1000;
+    const long long idle_ms = ss.flags.idle_ms > 0 ? ss.flags.idle_ms : (long long) ss.flags.idle_s * 1000;
     bool gate_busy = true;
     for (;;) {
         std::string line;
@@ -789,15 +791,23 @@ int serve(Session& ss) {
         } else {
             if (gate_busy) { strata::poly::SpillGate::instance().idle(); gate_busy = false; }
             const long long wait = idle_ms - (long long) ms_since(idle_t0);
+            bool have = false;
             if (wait <= 0) {
-                ss.kept.pre_park();   // no-op when everything is saved already; logs only when it copies
+                ss.kept.drop_stale(ss.flags.ttl_s);
+                // Bank a small chunk at a time while no request waits: the loop peeks between chunks, so
+                // a request that arrives interrupts within one small chunk and the rest stays for the
+                // next idle moment.  pre_park() is false when everything is saved (or the host has no
+                // memory to spare): then the loop ends and the idle wait restarts.
+                while (!(have = lines.try_pop(line)) && ss.kept.pre_park()) {}
+                ss.kept.relieve();
                 idle_t0 = Clock::now();
-                continue;
             }
-            if (!lines.pop_until(line, wait)) {
-                ss.kept.pre_park();
+            if (!have && !(wait > 0 && lines.pop_until(line, wait))) {
+                ss.kept.drop_stale(ss.flags.ttl_s);
+                while (!(have = lines.try_pop(line)) && ss.kept.pre_park()) {}
+                ss.kept.relieve();
                 idle_t0 = Clock::now();
-                continue;
+                if (!have) continue;
             }
         }
         if (line == "QUIT") break;
@@ -1004,7 +1014,7 @@ int serve(Session& ss) {
                     (long long) r.resume, hits, hits + misses, (long long) r.read);
         std::fflush(stdout);
         engine.trim();
-        ss.kept.release();
+        ss.kept.relieve();
         if (admit >= 0) {
             Slot& sl = slots[(size_t) admit];
             const bool goes_on = std::strcmp(r.finish, "length") == 0 && first >= 0 && admit_max > 1 &&
@@ -1276,8 +1286,11 @@ void usage() {
                   "  --conversation-cache-idle-s N       the cache work (pre-parking the current conversation, writing\n"
                   "                         saved rows out) waits until the engine has been idle this long (default\n"
                   "                         5; 0 = at once, the way it was)\n"
-                  "  --conversation-cache-focus N        a conversation used within this many requests keeps its parked copy\n"
+                   "  --conversation-cache-idle-ms N      the idle moment begins after this many milliseconds (0: idle-s)\n"
+                   "  --conversation-cache-focus N        a conversation used within this many requests keeps its parked copy\n"
                   "                         while any other candidate exists (default 12; 0: off)\n"
+                   "  --conversation-cache-ttl-s N        drop a parked conversation the client has not used for N seconds\n"
+                   "                         (default 0: never; a session that returns reads its prompt again)\n"
                   "  --batch N              N answers written together, each in a sequence of its own with its own\n"
                   "                         state and attention rows (default 0 = one at a time; at most 8);\n"
                  "                         --slots N is the same\n"
@@ -1410,7 +1423,9 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
         else if (a == "--conversation-cache-pre-park-min-free-mib") cache.pre_park_floor_mib = std::atoll(val());
         else if (a == "--conversation-cache-idle-s") cache.idle_s = std::atoi(val());
+        else if (a == "--conversation-cache-idle-ms") cache.idle_ms = std::atoll(val());
         else if (a == "--conversation-cache-focus") cache.o.focus = std::atoi(val());
+        else if (a == "--conversation-cache-ttl-s") cache.ttl_s = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());
@@ -1510,7 +1525,40 @@ int main(int argc, char** argv) {
                                      "(--conversation-cache-mib N asks for one anyway)\n");
         }
         if (cache.idle_s < 0) cache.idle_s = 0;
-        strata::poly::SpillGate::instance().idle_seconds(cache.idle_s);
+        if (cache.idle_ms < 0) cache.idle_ms = 0;
+        // The server asks for 250 ms — a small chunk banks in every idle moment.
+        // The writes that move a parked bank from RAM to its file wait for a quiet engine, and the quiet the
+        // server asks for (--conversation-cache-idle-s, 1 s - that one also paces the idle tick's own copying,
+        // which wants to stay short) is too short for them: a busy stretch of requests that close together
+        // never opens the window and the writes starve behind it, holding the banks' RAM (spill.hpp waits at
+        // most STRATA_SPILL_MAX_WAIT_MS).  STRATA_SPILL_IDLE_S sets how long a quiet stretch a write wants
+        // instead; 10 s by default, an hour at most.
+        long long spill_idle_s = 10;
+        if (const char* v = std::getenv("STRATA_SPILL_IDLE_S")) {
+            const long long n = std::atoll(v);
+            if (n > 0) spill_idle_s = n;
+        }
+        if (spill_idle_s > 3600) spill_idle_s = 3600;
+        strata::poly::SpillGate::instance().idle_seconds((int) spill_idle_s);
+        std::fprintf(stderr, "strata-poly: a parked bank's RAM-to-file write waits %lld s of quiet "
+                             "(STRATA_SPILL_IDLE_S)\n", spill_idle_s);
+        // The shelf's RAM cap: past it the oldest parked banks go to their files (a bank on its file holds
+        // no RAM).  STRATA_SPILL_ON_FULL=1 without a cap uses three quarters of the conversation cache
+        // budget; the default (no env set) parks nothing but RAM and never writes a file.
+        int64_t shelf_ram_mib = 0;
+        if (const char* v = std::getenv("STRATA_SHELF_RAM_MIB")) shelf_ram_mib = std::atoll(v);
+        if (const char* v = std::getenv("STRATA_SPILL_ON_FULL")) {
+            if (std::atoi(v) != 0 && shelf_ram_mib <= 0) shelf_ram_mib = cache.o.park_mib * 3 / 4;
+        }
+        if (shelf_ram_mib < 0) shelf_ram_mib = 0;
+        cache.o.shelf_ram_mib = shelf_ram_mib;
+        std::fprintf(stderr, "strata-poly: the shelf's RAM cap is %lld MiB; past it the oldest parked banks "
+                             "are written to their files (0: no bank is ever written)\n",
+                     (long long) shelf_ram_mib);
+        if (const auto swept = strata::poly::sweep_orphan_temp_files(); swept.first > 0)
+            std::fprintf(stderr, "strata-poly: swept %d orphaned conversation-cache files (%.1f MiB) that an engine "
+                                 "killed without a chance to clean up left behind\n",
+                         swept.first, (double) swept.second / (1024.0 * 1024.0));
         Session ss(engine, eos, cache, lookup);
         int rc = 0;
         if (want_serve) {
@@ -1541,3 +1589,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

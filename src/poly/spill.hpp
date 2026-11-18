@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 namespace strata::poly {
 
@@ -33,12 +34,16 @@ public:
     /// Mark the engine as idle: the idle window starts now.
     void idle();
     /// Wait until the engine has been idle for idle_seconds.  With idle_seconds==0 (the default) this returns
-    /// immediately regardless of busy state.  Returns true when the wait is over.  Sleeps in ~250 ms slices so a
-    /// process teardown never blocks on it.  Two test seams: probe replaces the entire busy/idle logic (returns
-    /// when probe() is true); condition replaces only the busy/elapsed check (with the idle_seconds==0 fast-path
-    /// still applied first).  Both default to nullptr so production code is unchanged.
+    /// immediately regardless of busy state.  Returns true when the wait is over.  `max_wait_ms` caps the wait
+    /// (0: no cap): a server whose requests come less than idle_seconds apart never opens the window, and the
+    /// writes it holds back then never run - RAM the banks still hold is never given back.  Past the cap the
+    /// write proceeds anyway, taking some of the busy engine's memory bandwidth once.  Sleeps in ~250 ms slices
+    /// so a process teardown never blocks on it.  Two test seams: probe replaces the entire busy/idle logic
+    /// (returns when probe() is true); condition replaces only the busy/elapsed check (with the
+    /// idle_seconds==0 fast-path still applied first).  Both default to nullptr so production code is unchanged.
     bool wait_for_idle(const std::function<bool()>& probe = nullptr,
-                       const std::function<bool()>& condition = nullptr) const;
+                       const std::function<bool()>& condition = nullptr,
+                       long long max_wait_ms = 0) const;
     /// Process-wide singleton: the writer is a singleton, so the gate is too.
     static SpillGate& instance();
 
@@ -67,6 +72,7 @@ private:
     void write() const;   // on the writer's thread
     void map() const;
     void drop() const;
+    void unheap() const;   // frees the heap copy, if any, and takes its bytes off the counter
 
     const size_t n_;
     mutable std::mutex m_;
@@ -79,5 +85,15 @@ private:
     mutable intptr_t file_ = -1;        // the file: a handle on Windows, a descriptor elsewhere
     mutable void* mapping_ = nullptr;   // Windows: the file mapping's handle
 };
+
+/// The heap bytes banks hold right now: what has not reached its file yet (and under STRATA_NO_SPILL, all of
+/// it).  The conversation cache's log lines report it next to their parked figure, which counts the banks'
+/// logical size - this is the RAM the process actually holds for them.
+int64_t spill_heap_bytes();
+
+/// Deletes the conversation-cache files of engines that died without a chance to clean up (a power loss, an
+/// abrupt teardown).  Called once at startup, before this process has made any of its own.  Returns how
+/// many files went and how many bytes they held.
+std::pair<int, uint64_t> sweep_orphan_temp_files();
 
 }  // namespace strata::poly
