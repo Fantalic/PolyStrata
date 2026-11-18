@@ -7,6 +7,9 @@ what runs.  The rules, in order:
 
   1. A small prompt (<= small_toks tokens) always runs at once - the helper calls (titles,
      summaries) cost almost nothing even cold, so they never wait behind a big turn.
+      A quick call never queues; what it does to an armed hold is STRATA_AFFINITY_HOLD_SMALL -
+      pause (default: the countdown freezes while it runs and resumes after), reset (a fresh
+      window after it), or run (it burns the window).
   2. A prompt that continues a recently served conversation runs before a foreign big one.
      "Same conversation" is the engine's own turn checkpoint: the prompt's tokens up to its last
      turn-start token (<|im_start|>, the engine's TURN_ID) - the next turn of a chat re-renders
@@ -137,11 +140,12 @@ class Entry:
 class Affinity:
     """The waiting requests, the recently served conversations, the hold and the focus."""
 
-    def __init__(self, enabled: bool = False, hold_s: float = 20.0, small_toks: int = 4096,
+    def __init__(self, enabled: bool = False, hold_s: float = 20.0, small_toks: int = 4096, hold_small: str = "pause",
                  recent_n: int = 4, turn_id: int = TURN_ID):
         self.lock = threading.Lock()
         self.settings = {"enabled": bool(enabled), "hold_s": float(hold_s),
-                         "small_toks": int(small_toks), "recent_n": int(recent_n)}
+                         "small_toks": int(small_toks), "hold_small": str(hold_small).strip().lower(),
+                         "recent_n": int(recent_n)}
         self.turn_id = turn_id
         self.waiting: dict[str, Entry] = {}         # insertion order = arrival order
         self.recent: deque = deque(maxlen=max(1, int(recent_n)))   # served conversations' checkpoints
@@ -152,6 +156,17 @@ class Affinity:
         self.running = True                   # queue accepts requests (True) or paused (False)
         self.paused = False                   # True while paused (for symmetry with running)
         self.paused_requests: set[str] = set()  # individual requests paused by user
+
+    def _hold_left(self, now=None) -> float:
+        """Seconds left on the armed hold, with a pause frozen: while a quick unrelated request runs
+        (paused_at set), the countdown stands still, so the busy time does not eat the window."""
+        if not self.hold:
+            return 0.0
+        now = time.monotonic() if now is None else now
+        left = self.hold["until"] - now
+        if self.hold.get("paused_at") is not None:
+            left += now - self.hold["paused_at"]
+        return max(left, 0.0)
 
     # ---- registration -------------------------------------------------
     def register(self, id: str | None, ids: list, path: str = "", snippet: str = "", session_name: str = "",
@@ -182,6 +197,11 @@ class Affinity:
             return False
         with self.lock:
             if entry.small(s["small_toks"]):        # rule 1: small always runs
+                if (s["hold_small"] == "pause" and self.hold is not None
+                        and self.hold.get("paused_at") is None
+                        and self._hold_left() > 0
+                        and not _continues(self.hold["prefix"], self.hold["bundle"], entry)):
+                    self.hold["paused_at"] = time.monotonic()
                 return True
             if self.skip_once:                      # rule 4's Skip: one foreign request passes
                 self.skip_once = False
@@ -203,7 +223,7 @@ class Affinity:
                         ok = False
                     elif self.hold:                 # rule 3: the hold window
                         ok = _continues(self.hold["prefix"], self.hold["bundle"], entry) \
-                            or time.monotonic() >= self.hold["until"]
+                            or self._hold_left() <= 0
                     else:
                         ok = True                   # nothing defers it: it runs
             if ok:
@@ -211,16 +231,18 @@ class Affinity:
             elif not entry.deferred:                # count a wait episode once, not every check
                 entry.deferred = True
                 entry.reason = ("focus" if self.focused else
-                                "hold" if self.hold and time.monotonic() < self.hold["until"] else
+                                "hold" if self.hold and self._hold_left() > 0 else
                                 "affinity")
                 self.counters["deferred"] += 1
             return ok
 
     def served(self, ids: list, entry: "Entry | None" = None) -> None:
         """The turn is over (the caller still holds the FIFO): remember the conversation, then arm
-        the hold when it was a big turn with no continuation already waiting.  `entry` is the served
-        request's own registration: it is still in `waiting` (the release runs after this) and must
-        not count as its own follower."""
+        the hold when it was a big turn or a continuation of the held conversation with no other
+        continuation already waiting; a quick unrelated call never clears the window - the turn's
+        end follows hold_small (pause, reset, or run).  `entry` is the served request's own
+        registration: it is still in `waiting` (the release runs after this) and must not count
+        as its own follower."""
         if not ids or not self.settings["enabled"]:
             return
         prefix = checkpoint(ids, self.turn_id)
@@ -230,12 +252,31 @@ class Affinity:
             big = len(ids) > self.settings["small_toks"]
             follower = any(_continues(prefix, bundle, e)
                            for e in self.waiting.values() if e is not entry)
-            if big and not follower and not self.focused:
+            held = (self.hold is not None and entry is not None
+                    and _continues(self.hold["prefix"], self.hold["bundle"], entry))
+            # A turn re-arms the hold when it was big, or when it continues the conversation the armed hold
+            # already protects (a quick follow-up of the protected session is activity: its window refreshes).
+            # A quick call from an unrelated session never clears the window: what the turn's end does to the
+            # countdown is hold_small - pause (frozen while it ran, the rest resumes), reset (a fresh window),
+            # or run (it burned the time).  An expired hold clears here.
+            if (big or held) and not follower and not self.focused:
                 self.hold = {"until": time.monotonic() + self.settings["hold_s"], "prefix": prefix,
-                             "bundle": bundle, "at": time.time()}
+                             "bundle": bundle, "at": time.time(), "paused_at": None}
                 self.counters["holds"] += 1
+            elif self.hold is not None and self._hold_left() > 0:
+                now = time.monotonic()
+                mode = self.settings["hold_small"]
+                if mode == "pause":
+                    if self.hold.get("paused_at") is not None:
+                        self.hold["until"] += now - self.hold["paused_at"]
+                        self.hold["paused_at"] = None
+                elif mode == "reset":
+                    self.hold["until"] = now + self.settings["hold_s"]
+                    self.hold["paused_at"] = None
+                else:                                       # "run": the busy time burned the window
+                    self.hold["paused_at"] = None
             else:
-                self.hold = None                    # a follower (or a small turn): no gap to bridge
+                self.hold = None                    # expired (or nothing armed): no gap to bridge
 
     # ---- the monitor page's controls ----------------------------------
     def focus(self, id: str) -> dict:
@@ -268,7 +309,7 @@ class Affinity:
             self.running = True
             self.paused = False
 
-    def set_settings(self, enabled: bool = None, hold_s: float = None, small_toks: int = None,
+    def set_settings(self, enabled: bool = None, hold_s: float = None, small_toks: int = None, hold_small: str = None,
                      recent_n: int = None) -> dict:
         with self.lock:
             if enabled is not None:
@@ -287,6 +328,10 @@ class Affinity:
                         or not 0 <= small_toks <= SMALL_TOKS_MAX:
                     raise ValueError(f"small_toks: tokens from 0 to {SMALL_TOKS_MAX}")
                 self.settings["small_toks"] = small_toks
+            if hold_small is not None:
+                if not isinstance(hold_small, str) or hold_small.strip().lower() not in ("pause", "reset", "run"):
+                    raise ValueError('hold_small: "pause", "reset" or "run"')
+                self.settings["hold_small"] = hold_small.strip().lower()
             if recent_n is not None:
                 if not isinstance(recent_n, int) or isinstance(recent_n, bool) \
                         or not 1 <= recent_n <= 16:

@@ -3342,9 +3342,11 @@ class Service:
         self.fifo = threading.Lock()
         # Affinity admission (serve/affinity.py, opt-in): $STRATA_AFFINITY=1 turns it on; the monitor
         # page's queue panel can change these at run time (POST /api/queue/settings).
+        # A quick call never queues; what it does to an armed hold is STRATA_AFFINITY_HOLD_SMALL (pause / reset / run, default pause).
         self.affinity = Affinity(enabled=os.environ.get("STRATA_AFFINITY") == "1",
                                  hold_s=float(os.environ.get("STRATA_AFFINITY_HOLD_S") or 20.0),
-                                 small_toks=int(os.environ.get("STRATA_AFFINITY_SMALL_TOKS") or 4096),
+                                 small_toks=int(os.environ.get("STRATA_AFFINITY_SMALL_TOKS") or 8192),
+                                 hold_small=(os.environ.get("STRATA_AFFINITY_HOLD_SMALL") or "pause"),
                                  recent_n=int(os.environ.get("STRATA_AFFINITY_RECENT") or 4))
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
