@@ -1,67 +1,29 @@
-# Affinity admission: one session at a time, opt-in
+# Affinity queue
 
-Parallel agent sessions (opencode sub-agents and friends) interleave their requests A,B,A,B after
-every tool call. Every switch makes the engine re-prefill the other conversation: measured on the
-poly box, a turn that follows its predecessor back-to-back reads ~200 new tokens (1.8 s), while a
-switch whose conversation was parked re-reads up to ~31K tokens (15-28 s at ~1,430 tok/s) - and
-when the last decode left the VRAM tight, the engine restores only the last 4096 tokens of a
-parked conversation, so the switch costs nearly the full prefill.
+A focused session keeps the engine for 20 s after a turn (`STRATA_AFFINITY_HOLD_S`, default 20). A big request
+from another session waits out the window.
 
-Affinity admission reorders WHO takes the single-request turn next. It never changes what runs,
-only when. **Off by default**: start the server with `$env:STRATA_AFFINITY = "1"`, or switch it on
-from the Request queue panel (`POST /api/queue/settings`).
+## Hold window
 
-## The rules, in order
+Twenty seconds of engine time after a turn (`STRATA_AFFINITY_HOLD_S`, default 20). A foreign request that
+lands during the window queues: it reads its prompt fresh when the window ends. Measured on this PC (RTX 3060
+Ti, Qwen3.6-35B-A3B, 12,288 MiB conversation-cache budget) a foreign 20K request waited the full 20 s
+(queue counter `deferred=1`), then read its 20,019 fresh tokens at 2,049 tok/s.
 
-1. **Small prompts run at once** (<= `STRATA_AFFINITY_SMALL_TOKS`, default 4096 tokens): helper
-   calls (titles, summaries) cost almost nothing even cold, so they never wait behind a big turn -
-   they jump in during a hold or a focus too. A small turn in the middle costs the hot session its
-   park/restore round-trip (~0.3-0.6 s).
-2. **A continuation runs before a foreign request.** "Same conversation" is the engine's own turn
-   checkpoint: the prompt's tokens up to its last turn-start token (`<|im_start|>`), exactly what
-   `pick_slot` matches on for batch slots. A session's next turn re-renders that prefix; another
-   session's prompt differs before it.
-3. **The hold**: after a big turn with no continuation queued, the server holds the turn for
-   `hold_s` (default 20 s) - the same session's follow-up usually arrives within seconds (a
-   tool-call round-trip) and then runs at delta cost. `hold_s` is one knob for both the wait and
-   the foreign request's max deferral: when it expires, the waiting foreign request goes.
-4. **Focus mode** (the Request queue panel): pin one conversation; its continuations run first and the server
-   waits for the follow-up **without a timeout**, until **Skip** lets exactly one foreign request
-   through or **Unfocus** clears it. Small requests keep jumping in throughout.
+## Quick calls never queue
 
-## The request queue panel
+Requests at most `STRATA_AFFINITY_SMALL_TOKS` tokens (default 8,192, covers the ~7.8K title/summary helpers)
+run at once and never queue. They do not end the focus window: what they do to the armed countdown is
+`STRATA_AFFINITY_HOLD_SMALL`. Measured on this PC helpers ran in 0.6 to 0.7 s with zero deferrals.
 
-Two places show it, both fed by `GET /api/queue`:
+## Hold-small: pause, reset, run
 
-- **The main page's Monitor tab** (`http://127.0.0.1:8095/#monitor`): the *Request queue* card
-  sits below the Model state card, collapsed until **Show**. That is the poly server's usual UI.
-- **The API monitor** (`/api-monitor`): the same panel below the status cards - only served when
-  the run config has `"api_monitor": true` (it is off by default).
+`STRATA_AFFINITY_HOLD_SMALL` controls what a quick call does to the 20 s countdown. Three modes:
 
-One row per waiting request: arrival time, prompt tokens (small/big), state (queued / affinity /
-hold / focus), the last user message's first ~100 characters - that is what identifies the
-opencode session - and the endpoint. The card bar has the Affinity switch, the Hold seconds
-input (applied to the running hold at once), **Skip**, and per-row **Focus / Unfocus**. Backed by
-`GET /api/queue` and `POST /api/queue/settings|focus|skip|unfocus` (own page + auth, like /load
-and /unload).
+- **pause** (default): the countdown freezes while the quick call runs. A 4.6 s helper consumed 0.7 s of the
+  20 s window (19.9 s remaining before it, 19.2 s after).
+- **reset**: the quick call starts a fresh 20 s window.
+- **run**: the quick call burns into the countdown.
 
-## Knobs (environment; the panel overrides at run time)
-
-| variable | default | meaning |
-|---|---|---|
-| `STRATA_AFFINITY` | off | `1` enables the admission |
-| `STRATA_AFFINITY_HOLD_S` | 20 | the hold window in seconds (0 = never wait for a follow-up) |
-| `STRATA_AFFINITY_SMALL_TOKS` | 4096 | prompts at most this long never wait |
-| `STRATA_AFFINITY_RECENT` | 4 | how many served conversations stay matchable |
-
-Notes: `STRATA_ADMIT_SHORT_FIRST` composes with this (affinity orders whole requests, short-first
-orders the engine's prompt admissions). Batch mode (`--batch`) is unchanged - its slots already
-pick the slot that holds the conversation (pick_slot). The counters (deferrals, holds, skips) are
-in `GET /api/queue`; each hold/deferral decision prints a `[strata] affinity:` log line.
-
-## Measuring the effect
-
-Before/after, compare in `C:\.strata\logs\poly\<model>.log` the `prompt N tokens = R reused + M
-read` lines of the same session's consecutive turns: the goal is `R` near the previous turn's
-prompt size and `M` near the delta only. The queue panel's wait badge shows what the other
-sessions paid for it.
+Measured on this PC a pause-mode helper consumed 0.7 s of the 20 s window (19.9 s remaining before it,
+19.2 s after).

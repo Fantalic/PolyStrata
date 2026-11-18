@@ -249,12 +249,35 @@ and its prompt lines read 28672 tokens reused of 39,023-47,095. No evictions in 
 rule - oldest parked first, whatever its length - the same machine logged 2,187 evictions in six hours, and every
 switch back to the big session read the whole prompt again in 65-90 s.
 
+A parked conversation lives in engine RAM only (RAM-only shelf, default): no file is ever written. When the
+budget is full the smallest unused bank is dropped (cheapest to read again). Opt into disk copies with
+`STRATA_SPILL_ON_FULL=1` plus `STRATA_SHELF_RAM_MIB`. Measured on this PC (RTX 3060 Ti, Qwen3.6-35B-A3B, 12,288
+MiB conversation-cache budget) four 20K-token banks held 3.2 GiB of heap, zero temp files after the whole test
+run, zero evictions.
+
+Two hundred fifty milliseconds after the last request (`--conversation-cache-idle-ms`, default 250) the engine banks
+the live conversation chunk by chunk (an eighth of the budget per chunk) until it is fully saved; a request
+that arrives interrupts within one chunk. Measured on this PC a 20,018-token conversation banks in one 90 ms
+chunk; switching away then parks in 0.0 ms; switching back restores the 20,018 tokens in 36.5 ms and the next
+turn reuses 20,018 of 20,019 prompt tokens.
+
+A parked conversation nobody has used for the TTL (`--conversation-cache-ttl-s`, default 900) is dropped in the
+idle tick. (Unit tested only; no live measurement.)
+
 The API reports what was not read again as `usage.prompt_tokens_details.cached_tokens` (Responses:
 `input_tokens_details.cached_tokens`, Messages: `cache_read_input_tokens`), and the web app's Monitor has a
-Conversation cache card.
+Conversation cache card. Every cache log line ends with `heap=<MiB>` (the RAM the banks actually hold right
+now) beside `bytes=` (the shelf's logical size), so the status reflects real memory use.
 
 It is off by default, as it is in `strata`. Without it the engine still keeps the last conversation: a next turn
 goes on from where it stopped, and an edit goes back to the nearest checkpoint.
+
+### Environment variables for disk spilling
+
+With no env set, no bank is ever written to disk. When the budget is full the smallest unused bank is dropped (the
+cheapest to read again). To keep a disk copy of every bank set `STRATA_SPILL_ON_FULL=1` and optionally tune the
+budget with `STRATA_SHELF_RAM_MIB`, the idle timeout `STRATA_SPILL_IDLE_S`, and the maximum write wait
+`STRATA_SPILL_MAX_WAIT_MS`.
 
 ## Options
 
@@ -287,17 +310,20 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--cpu-share F` | as the times say | in a batch of fewer tokens than `--stage-ahead`, the share of the experts outside VRAM that the CPU computes while the others are copied: the ones the fewest tokens chose; 0 = none |
 | `--prompt-cache N` | 6 | checkpoints kept of a conversation; 0 = only a next turn is not read again |
 | `--prompt-cache-every N` | 2048 | a checkpoint every N prompt tokens, besides the one at a prompt's end; 0 = none |
-| `--conversation-cache-mib N` | 0 | RAM for parked conversations; 0 = off; `auto` = 40% of the RAM free once the model is loaded, at most 8192 |
-| `--conversation-cache-slots N` | 4 | parked conversations at most |
+| `--conversation-cache-mib N` | 12,288 | RAM shelf budget for parked conversations (about six banked big sessions on this PC); `auto` = 40% of the RAM free once the model is loaded, at most 8192 |
+| `--conversation-cache-slots N` | 12 | parked conversations at most |
 | `--conversation-cache-min-tokens N` | 1024 | a shorter conversation is not parked |
 | `--conversation-cache-min-free-mib N` | 2560 | park only while this much physical RAM stays free |
 | `--conversation-cache-pre-park-min-free-mib N` | 1024 | idle pre-parking leaves this much physical RAM free; the switch's park keeps `--conversation-cache-min-free-mib` |
 | `--conversation-cache-idle-s N` | 5 | the cache work (pre-parking the current conversation, writing saved rows out) waits until the engine has been idle this long; 0 = at once |
+| `--conversation-cache-idle-ms N` | 250 | the idle moment: 250 ms after the last request the engine banks the live conversation chunk by chunk (an eighth of the budget per chunk) until fully saved; a request that arrives interrupts within one chunk |
+| `--conversation-cache-ttl-s N` | 900 | stale-session TTL: a parked conversation nobody has used for N seconds is dropped in the idle tick (unit tested only) |
 | `--conversation-cache-focus N` | 12 | a conversation used within this many requests keeps its parked copy while any other candidate exists; 0 = off |
 | `--eos-ids ID,ID,...` | from the GGUF | tokens that end a reply |
 | `--tail-skip N` | 0; setup gives Qwen3.6 6 | an expert outside VRAM that every token of a window ranks at place N+1 or later among its experts is left out: faster, and the answers move a little |
 | `STRATA_FREEZE_EXPERTS` | not set | hold the split of the routed experts between the card and the CPU still for the engine's whole run, so a greedy answer is a function of the request alone: same request, same answer, bit for bit. With guesses on (`--window` above 1 and a block or `--lookup`) the block's guesses and their windows still take their sizes from the machine's pace, which the freeze does not hold: on the cards measured so far it repeated with them on (RX 9060 XT, several thread counts and loads) and on one RTX 4070 laptop it did not — add `--window 1` for a repeat wherever the guesses are on. Measured cost: nothing measurable on the default path, 4-7% at a short prompt with the freeze set |
 | `STRATA_NO_SPILL=1` | not set | keep parked conversations' blobs in heap instead of writing them to temporary files; parking still works but RAM use grows accordingly |
+| `STRATA_SPILL_ON_FULL=1` | not set | when the budget is full, write banks to disk (RAM-only shelf is the default); pairs with `STRATA_SHELF_RAM_MIB`, `STRATA_SPILL_IDLE_S`, `STRATA_SPILL_MAX_WAIT_MS` |
 
 `strata-poly` with no arguments prints the list, with the options for running it without the server.
 

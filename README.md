@@ -77,12 +77,38 @@ This fork is maintained for one PC's daily use and its own experiments. The chan
   0.12-0.18 s and 28,672 of its 39,023-47,095 prompt tokens reused, and no evictions - the old oldest-first rule
   logged 2,187 evictions in six hours on the same machine
   ([docs/GLM.md](docs/GLM.md#several-conversations-at-once)).
+- **RAM-only shelf (default):** a parked conversation lives in engine RAM only - no file is ever written; when the
+  budget is full the smallest unused bank is dropped (cheapest to read again). Opt into disk copies with
+  `STRATA_SPILL_ON_FULL=1` plus `STRATA_SHELF_RAM_MIB`
+  ([docs/GLM.md](docs/GLM.md#several-conversations-at-once)). Measured on this PC four 20K-token banks held
+  3.2 GiB of heap, zero temp files after the whole test run, zero evictions.
+- **Interruptible idle banking:** 250 ms after the last request the engine banks the live conversation chunk by
+  chunk (an eighth of the budget per chunk) until it is fully saved; a request that arrives interrupts within one
+  chunk
+  ([docs/GLM.md](docs/GLM.md#several-conversations-at-once)). Measured on this PC a 20,018-token conversation
+  banks in one 90 ms chunk; switching away parks in 0.0 ms; switching back restores the 20,018 tokens in 36.5 ms
+  and the next turn reuses 20,018 of 20,019 prompt tokens.
+- **Every cache log line ends with `heap=<MiB>`:** the RAM the banks actually hold right now, next to `bytes=`
+  (the shelf's logical size), so the status reflects real memory use.
+- **Stale sessions drop after 15 minutes:** a parked conversation nobody has used for the TTL is dropped in the
+  idle tick
+  ([docs/GLM.md](docs/GLM.md#several-conversations-at-once)).
 - **A queue and web UI for agents that take turns:** session bundles bind a sub-agent's requests to its main
   session, single requests can be paused and resumed, the request queue can be reordered by drag-and-drop, paused
   and played on, shown compressed, and vision can be switched on and off while the server runs.
+- **A focused session keeps the engine for 20 s after a turn:** a big request from another session waits out the
+  window; measured on this PC a foreign 20K request waited the full 20 s (queue counter deferred=1), then read its
+  20,019 fresh tokens at 2,049 tok/s
+  ([docs/AFFINITY_QUEUE.md](docs/AFFINITY_QUEUE.md)).
+- **Quick helper calls run at once and never end the focus:** calls under 8,192 tokens (the ~7.8K title/summary
+  helpers) never queue, and the armed 20 s window pauses while they run
+  ([docs/AFFINITY_QUEUE.md](docs/AFFINITY_QUEUE.md)).
 - **A local Windows build of the engine:** [tools/build-poly.ps1](tools/build-poly.ps1) builds the strata-poly
   engine on this PC with the release recipe
   ([docs/GLM.md](docs/GLM.md#building-the-engine-locally-on-this-pc)).
+- **Crash cleanup:** parked-conversation temp files left by a dead engine (power loss, abrupt kill) are swept at
+  startup by their embedded PID; a failed disk write in the opt-in spilling mode is retried on the next request
+  instead of held forever.
 
 ## How fast is it?
 
