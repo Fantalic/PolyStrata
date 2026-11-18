@@ -96,6 +96,7 @@ This fork is maintained for one PC's daily use and its own experiments. The chan
 - **A queue and web UI for agents that take turns:** session bundles bind a sub-agent's requests to its main
   session, single requests can be paused and resumed, the request queue can be reordered by drag-and-drop, paused
   and played on, shown compressed, and vision can be switched on and off while the server runs.
+- **A companion OpenCode plugin sends the queue its session headers:** [opencode-local-context](https://github.com/Fantalic/opencode-local-context) tags every request an OpenCode agent sends to the server with `X-Session-Id`, `X-Root-Session` and `X-Agent`, so sub-agent calls bundle with their main session ([how the headers are used](docs/AFFINITY_QUEUE.md)). The same plugin folds completed todo steps out of the agent's context and can use this server as the extraction backend for recovering folded context.
 - **A focused session keeps the engine for 20 s after a turn:** a big request from another session waits out the
   window; measured on this PC a foreign 20K request waited the full 20 s (queue counter deferred=1), then read its
   20,019 fresh tokens at 2,049 tok/s
