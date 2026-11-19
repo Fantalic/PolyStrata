@@ -288,9 +288,9 @@ static void parse_alternative(std::string_view src, size_t& i,
                               std::unordered_map<std::string, size_t>* name_to_id,
                               std::vector<GrammarRule>* rules,
                               std::string& err) {
-    while (i < src.size() && src[i] != '|' && src[i] != ')' && src[i] != '\n') {
+    while (i < src.size() && src[i] != '|' && src[i] != ')' && src[i] != '\n' && src[i] != '\r') {
         skip_ws(src, i);
-        if (i >= src.size() || src[i] == '|' || src[i] == ')' || src[i] == '\n') break;
+        if (i >= src.size() || src[i] == '|' || src[i] == ')' || src[i] == '\n' || src[i] == '\r') break;
         parse_element(src, i, out, name_to_id, rules, err);
         if (!err.empty()) return;
     }

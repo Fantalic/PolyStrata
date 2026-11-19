@@ -85,6 +85,18 @@ ws ::= [ \t]*
         std::fprintf(stderr, "test 1h: failed to parse JSON-shaped grammar\n");
         std::exit(1);
     }
+
+    // The same grammar with CRLF line endings: \r is a rule-boundary
+    // terminator too (grammars arrive from Windows text transports).
+    std::string crlf = "root ::= object\r\nobject ::= \"{\" ws? pairs ws? \"}\"\r\n"
+                       "pairs ::= string \":\" value (\",\" string \":\" value)*\r\n"
+                       "string ::= \"\\\"\" chars \"\\\"\"\r\n"
+                       "chars ::= [^\\x22]*\r\nvalue ::= string | number\r\n"
+                       "number ::= [0-9]+\r\nws ::= [ \\t]*\r\n";
+    if (!Grammar::parse(crlf, g, err)) {
+        std::fprintf(stderr, "test 1i: failed to parse CRLF grammar: %s\n", err.c_str());
+        std::exit(1);
+    }
 }
 
 // --- Test 2: Parser rejects invalid grammars ------------------------------
