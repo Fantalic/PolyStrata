@@ -19,6 +19,7 @@
 #endif
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/platform/memory.hpp"
+#include "strata/core/grammar.hpp"
 
 #include "ggml.h"
 
@@ -1498,6 +1499,14 @@ void Engine::load_shape() {
     const MetaValue* vocab = meta_in(*gg_, "vocab_size");
     const TensorInfo* te = gg_->find("token_embd.weight");
     n_vocab_ = vocab ? (int) vocab->u : te && te->shape.size() == 2 ? (int) te->shape[1] : 0;
+
+    // Token strings for grammar-constrained decoding: the full
+    // tokenizer.ggml.tokens array (the reader keeps all items for this key).
+    if (const MetaValue* tv = gg_->get("tokenizer.ggml.tokens"); tv && tv->type == MetaType::ARRAY) {
+        vocab_.reserve(tv->items.size());
+        for (const auto& e : tv->items) vocab_.push_back(strata::core::decode_token_bytes(e.s));
+    }
+
     rms_eps_ = shape_f("attention.layer_norm_rms_epsilon");
     n_expert_ = shape_i("expert_count");
     n_used_ = shape_i("expert_used_count");

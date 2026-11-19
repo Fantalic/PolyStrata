@@ -218,6 +218,7 @@ public:
     void load(const Options& o);
 
     int n_vocab() const { return n_vocab_; }
+    const std::vector<std::string>& vocab() const { return vocab_; }
     /// The rows of the output a guess is picked from.  A guess that is never right costs a window's place and no
     /// token, so the rare tokens may be left out, where the vocabulary has the common ones first.
     int draft_rows() const {
@@ -694,6 +695,7 @@ protected:
 
     // geometry
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
+    std::vector<std::string> vocab_;
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for

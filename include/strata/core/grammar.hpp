@@ -6,6 +6,24 @@
 
 namespace strata::core {
 
+// GGUF token strings store sentencepiece byte-fallback tokens as the literal
+// text "<0xHH>"; the grammar module needs the raw byte. Returns the token's
+// byte content: decoded when the whole string is a well-formed <0xHH> token,
+// otherwise unchanged. (llama.cpp applies the same convention.)
+inline std::string decode_token_bytes(const std::string& tok) {
+    if (tok.size() == 6 && tok[0] == '<' && tok[1] == '0' && tok[2] == 'x' && tok[5] == '>') {
+        auto hv = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        const int hi = hv(tok[3]), lo = hv(tok[4]);
+        if (hi >= 0 && lo >= 0) return std::string(1, (char)((hi << 4) | lo));
+    }
+    return tok;
+}
+
 // Grammar-constrained decoding: parse GBNF text, maintain a pushdown-automaton
 // state, and per-step compute which token ids may legally follow given a byte-
 // level token vocabulary.  Algorithm follows llama.cpp's grammar semantics.

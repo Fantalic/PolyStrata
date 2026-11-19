@@ -295,7 +295,9 @@ struct MetaValue {
     double num() const { return (type == MetaType::F32 || type == MetaType::F64) ? f : (double)u; }
 };
 
-inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
+// When full_strings is true, an ARRAY of STRING stores every item (the token
+// vocabulary needs all token strings; other arrays keep a 64-item sample).
+inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0, bool full_strings = false) {
     if (depth > 2) throw std::runtime_error("GGUF: array nesting too deep");
     MetaValue v;
     v.type = t;
@@ -343,10 +345,12 @@ inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
         v.elem = (MetaType)c.read<uint32_t>();
         v.count = c.read<uint64_t>();
         if (v.count > (1u << 24)) throw std::runtime_error("GGUF: implausible array length");
-        v.items.reserve((size_t)std::min<uint64_t>(v.count, 64));
+        const bool keep_all = full_strings && v.elem == MetaType::STRING;
+        if (keep_all) v.items.reserve((size_t)v.count);
+        else v.items.reserve((size_t)std::min<uint64_t>(v.count, 64));
         for (uint64_t i = 0; i < v.count; ++i) {
-            MetaValue e = read_value(c, v.elem, depth + 1);
-            if (i < 64) v.items.push_back(std::move(e)); // keep a sample; the count is what matters
+            MetaValue e = read_value(c, v.elem, depth + 1, full_strings);
+            if (i < 64 || keep_all) v.items.push_back(std::move(e));
         }
         break;
     }
@@ -454,7 +458,11 @@ private:
         for (uint64_t i = 0; i < n_kv; ++i) {
             std::string key = c.str();
             MetaType t = (MetaType)c.read<uint32_t>();
-            meta_.emplace(std::move(key), read_value(c, t));
+            // The token vocabulary is the one array whose FULL contents matter
+            // (the grammar module consumes every token string); every other
+            // array keeps the 64-item sample cap.
+            const bool full = (key == "tokenizer.ggml.tokens");
+            meta_.emplace(std::move(key), read_value(c, t, 0, full));
         }
         tensors_.reserve((size_t)n_tensors);
         // GGUF has no index to arbitrate between two tensors of one name: find() is first-match, so a
