@@ -256,7 +256,7 @@ static void test_forced_json_walk() {
 root ::= object
 object ::= "{" ws? members ws? "}"
 members ::= string ":" value ("," string ":" value)*
-value ::= string | number | array
+value ::= string | number | array | object
 array ::= "[" ws? items ws? "]"
 items ::= value ("," value)*
 string ::= "\"" strchars "\""
@@ -267,34 +267,35 @@ ws ::= [ \t\n\r]*
 
     // Build vocab with essential tokens.
     std::vector<std::string> tokens;
-    // 0: "{"  1: "}"  2: "["  3: "]"
+    // 0-3: "{" "}" "[" "]"
     tokens.push_back("{");
     tokens.push_back("}");
     tokens.push_back("[");
     tokens.push_back("]");
-    // 4: "\""  5: ","  6: ":"
+    // 4-6: "\"" "," ":"
     tokens.push_back("\"");
     tokens.push_back(",");
     tokens.push_back(":");
-    // 7-12: "t","e","r","m","s"
+    // 7-11: "t" "e" "r" "m" "s"
     tokens.push_back("t");
     tokens.push_back("e");
     tokens.push_back("r");
     tokens.push_back("m");
     tokens.push_back("s");
-    // 13-16: "n","a","m","e"
+    // 12-14: "n" "a" "m"
     tokens.push_back("n");
     tokens.push_back("a");
     tokens.push_back("m");
-    // 17: space
+    // 15-17: " " "\t" "\n"
     tokens.push_back(" ");
-    // 18: tab
     tokens.push_back("\t");
-    // 19: newline
     tokens.push_back("\n");
-    // 20-21: "0"-"1" (for numbers)
+    // 18-19: "0" "1" (for numbers)
     tokens.push_back("0");
     tokens.push_back("1");
+    // 20-21: multibyte content tokens (multibyte walk uses ids 20/21)
+    tokens.push_back(std::string("\xE4\xBD\xA0", 3)); // 你
+    tokens.push_back(std::string("\xE5\xA5\xBD", 3)); // 好
     // 22: partial continuation
     tokens.push_back(std::string("\xAD", 1));
     // 23: EOG
