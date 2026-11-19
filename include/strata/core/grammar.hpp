@@ -29,6 +29,10 @@ inline bool operator==(const StackElem& a, const StackElem& b) {
     return a.rule_id == b.rule_id && a.pos == b.pos;
 }
 
+inline bool operator<(const StackElem& a, const StackElem& b) {
+    return a.rule_id != b.rule_id ? a.rule_id < b.rule_id : a.pos < b.pos;
+}
+
 using Stack = std::vector<StackElem>;
 
 struct CacheKey {
@@ -63,7 +67,7 @@ public:
 
     // Parse `gbnf` text into `out`.  Returns false and fills `error` on bad
     // grammar (empty text, unbalanced parens, unknown rule reference, left
-    // recursion, unsupported constructs like `~[` or `{n,m}`).
+    // recursion, unsupported constructs like `~[` or `[` without `]`).
     static bool parse(const std::string& gbnf, Grammar& out, std::string& error);
 
     // Provide the token vocabulary (token id → raw byte string) and the set of
@@ -112,7 +116,12 @@ private:
     bool match_char(const GrammarElement* pos, uint32_t chr) const;
     bool match_partial_char(const GrammarElement* pos) const;
     bool match_token(const GrammarElement* pos, uint32_t token_id) const;
-    void advance_stack(const Stack& stack, std::vector<Stack>& out) const;
+
+    // Advance a single stack by one byte: match the byte against the
+    // top element, advance past the matched element (and any range
+    // suffix), expand RuleRefs, pop on End — then dedup via sort+unique.
+    void advance_stack(const Stack& stack, uint8_t byte,
+                       std::vector<Stack>& out) const;
     void compute_mask() const;
 };
 

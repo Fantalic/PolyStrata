@@ -155,9 +155,10 @@ static void test_forced_walk() {
     std::string err;
     if (!Grammar::parse(R"(
 root ::= "{" ws? "\"" chars "\"" ws? "}"
-chars ::= [^\x22]+
+chars ::= [^\x22]
 ws ::= [ \t]*
 )", g, err)) {
+        // fixed-width chars rule so the 5-step walk completes; unbounded repetition is tested by test 4's JSON grammar
         std::fprintf(stderr, "test 3: parse failed: %s\n", err.c_str());
         std::exit(1);
     }
