@@ -531,64 +531,70 @@ static void close_stack_set(const std::vector<GrammarRule>& rules,
 
 // ── Character-class chain matching (llama.cpp semantics) ───────────────────
 
-// Walk the position's member chain starting at pos: the element at pos, then
-// subsequent CharAlt/CharRngUpper elements.  For each member:
-//   Char(v), CharNot(v), CharAlt(v) → matches iff byte == v
-//   CharRngUpper(h) → range alternative; preceding element must be Char(lo)
-//                     or CharAlt(lo) and lo <= byte <= h.
-// Positive class (first member is Char): matches iff ANY member matches (OR).
-// Negated class (first member is CharNot): matches iff NO member matches (AND).
+// A character class is encoded as a run of member units:
+//   Char/CharNot(v) + CharAlt(0)        → single member v (CharAlt(0) terminator)
+//   Char/CharNot(lo) + CharRngUpper(hi) → range member lo..hi
+// A Char/CharNot NOT followed by CharAlt/CharRngUpper is a lone literal char
+// (from a quoted string) — it ends the chain and is its own member.
+// Member hit test: byte == member value, uniformly (the Char vs CharNot type
+// only marks the member; the FIRST member's type marks the class negated).
+// Positive class: matches iff ANY member hits. Negated: iff NO member hits.
+
+// Next stack position after ONE byte is consumed at a class position pos:
+// the first element past the whole member chain (or pos+1 for a lone char).
+static size_t class_advance_end(const GrammarRule& rule, size_t pos) {
+    size_t i = pos;
+    while (i < rule.size()) {
+        const GrammarElement& e = rule[i];
+        if (e.type != ElemType::Char && e.type != ElemType::CharNot) break;
+        if (i + 1 < rule.size()) {
+            const GrammarElement& n = rule[i + 1];
+            if (n.type == ElemType::CharRngUpper || n.type == ElemType::CharAlt) {
+                i += 2; // member unit consumed (terminator or range pair)
+                continue;
+            }
+        }
+        ++i; // lone literal char (or unterminated trailing member)
+        break;
+    }
+    return i;
+}
+
 static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
                           bool negated, uint32_t rule_id) {
     bool any_matches = false;
-    for (size_t i = pos; i < rule.size(); ++i) {
-        const GrammarElement& elem = rule[i];
-        bool m = false;
-        switch (elem.type) {
-            case ElemType::Char:
-                m = (elem.value == byte);
-                break;
-            case ElemType::CharNot:
-                m = (elem.value == byte);
-                break;
-            case ElemType::CharAlt:
-                m = (elem.value == byte);
-                break;
-            case ElemType::CharRngUpper: {
-                // Range upper bound: preceding element provides lower bound.
-                if (i > 0) {
-                    const GrammarElement& prev = rule[i - 1];
-                    if ((prev.type == ElemType::Char ||
-                         prev.type == ElemType::CharAlt) &&
-                        prev.value <= byte && byte <= elem.value) {
-                        m = true;
-                    }
-                }
+    size_t i = pos;
+    while (i < rule.size()) {
+        const GrammarElement& e = rule[i];
+        if (e.type != ElemType::Char && e.type != ElemType::CharNot) break;
+        bool hit = false;
+        if (i + 1 < rule.size()) {
+            const GrammarElement& n = rule[i + 1];
+            if (n.type == ElemType::CharRngUpper) {
+                hit = (e.value <= byte && byte <= n.value);
+                i += 2;
+            } else if (n.type == ElemType::CharAlt) {
+                hit = (e.value == byte);
+                i += 2;
+            } else {
+                // Lone literal char member: accumulate BEFORE the break — the
+                // `if (hit)` block below is skipped once we leave the loop.
+                if (e.value == byte) any_matches = true;
+                ++i;
                 break;
             }
-            default:
-                goto done; // stop at non-chain element
+        } else {
+            if (e.value == byte) any_matches = true;
+            ++i;
+            break;
         }
-        // Skip Char/CharNot/CharAlt members whose value is 0 — byte 0 never
-        // occurs in input text, so the member would incorrectly hit on it.
-        if ((elem.type == ElemType::Char ||
-             elem.type == ElemType::CharNot ||
-             elem.type == ElemType::CharAlt) &&
-            elem.value == 0) {
-            continue;
-        }
-        if (m) {
+        if (hit) {
             any_matches = true;
-            // For positive class, early exit (OR).
-            if (!negated) break;
-        } else if (!negated) {
-            // Positive class: one CharRngUpper that doesn't match — keep
-            // looking (there may be another Char/CharAlt that does).
+            if (!negated) break; // positive: one hit decides (OR)
         }
-        // Negated class: keep scanning — need ALL members to match.
+        // Negated class: keep scanning — the match needs NO member to hit.
     }
-done:
-    bool matched = negated ? !any_matches : any_matches;
+    const bool matched = negated ? !any_matches : any_matches;
     if (g_trace)
         std::fprintf(stderr,
                      "[G] class r%u p%zu byte=0x%02x matched=%d neg=%d\n",
@@ -624,9 +630,11 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
         switch (elem.type) {
             case ElemType::Char:
                 matched = class_matches(rule, top.pos, byte, false, top.rule_id);
+                advance_pos = class_advance_end(rule, top.pos);
                 break;
             case ElemType::CharNot:
                 matched = class_matches(rule, top.pos, byte, true, top.rule_id);
+                advance_pos = class_advance_end(rule, top.pos);
                 break;
             case ElemType::CharRngUpper:
                 // Needs lower bound from preceding Char in same rule.
@@ -654,12 +662,6 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
         }
         if (g_trace) std::fprintf(stderr, "[G] match r%u p%zu byte=0x%02x\n", top.rule_id, top.pos, (unsigned)byte);
 
-        // Advance past the element and any CharAlt/CharRngUpper suffix chain.
-        while (advance_pos < rule.size() &&
-               (rule[advance_pos].type == ElemType::CharAlt ||
-                rule[advance_pos].type == ElemType::CharRngUpper)) {
-            advance_pos++;
-        }
 
         Stack advanced_stack(stk.begin(), stk.end() - 1);
         // FIX 1: push next position ONLY when NOT End/Alt (else element is dropped).
