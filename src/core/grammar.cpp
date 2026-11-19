@@ -360,6 +360,10 @@ bool Grammar::parse(const std::string& gbnf, Grammar& out, std::string& error) {
         std::vector<GrammarElement> elems;
         parse_alternatives(gbnf, pi, &elems, &nm2, &out.m_rules, error);
         if (!error.empty()) return false;
+        if (elems.empty()) {
+            error = "rule '" + nm + "' has no right-hand side";
+            return false;
+        }
         elems.push_back({ElemType::End, 0});
         out.m_rules[rid] = std::move(elems);
 
@@ -703,11 +707,17 @@ void Grammar::compute_mask() const {
     auto it = m_cache.find(key);
     if (it != m_cache.end()) { m_mask = it->second; m_mask_valid = true; return; }
 
+    // EOG ids come from the engine (set_vocab); empty-string tokens are the
+    // legacy convention (phase-1 tests).  Both are EOG for masking purposes.
+    std::vector<char> is_eog((size_t) m_vocab_size, 0);
+    for (int eid : m_eog_ids)
+        if (eid >= 0 && eid < m_vocab_size) is_eog[(size_t) eid] = 1;
+
     for (const auto& stack : m_stacks) {
         // EOG allowed iff any live stack is empty (accepting).
         if (stack.empty()) {
             for (int tid = 0; tid < m_vocab_size; tid++) {
-                if (m_tokens[tid].empty())
+                if (m_tokens[tid].empty() || is_eog[tid])
                     m_mask[tid / 64] |= (1ULL << (tid % 64));
             }
             continue;
@@ -721,7 +731,7 @@ void Grammar::compute_mask() const {
 
         for (int tid = 0; tid < m_vocab_size; tid++) {
             const std::string& tok = m_tokens[tid];
-            if (tok.empty()) continue; // EOG handled above.
+            if (tok.empty() || is_eog[tid]) continue; // EOG handled above.
 
             // Continuation-byte tokens: allowed ONLY when m_n_remain > 0.
             // When m_n_remain == 0 a lone continuation byte is illegal.
@@ -779,6 +789,23 @@ void Grammar::compute_mask() const {
 
     m_cache[key] = m_mask;
     m_mask_valid = true;
+}
+
+// ── apply_logit_mask ──────────────────────────────────────────────────────
+
+void Grammar::apply_logit_mask(float* logits, int n_vocab) {
+    compute_mask();
+    for (int id = 0; id < n_vocab; ++id) {
+        const bool allowed = id < m_vocab_size
+            && (m_mask[(size_t)id >> 6] >> (id & 63)) & 1ULL;
+        if (!allowed) logits[id] = -1e30f;
+    }
+}
+
+bool Grammar::is_allowed(int id) const {
+    if (id < 0 || id >= m_vocab_size) return false;
+    compute_mask();
+    return (m_mask[(size_t)id >> 6] >> (id & 63)) & 1ULL;
 }
 
 // ── allowed_mask ──────────────────────────────────────────────────────────

@@ -112,6 +112,15 @@ public:
     // Vocab size the mask covers (0 before `set_vocab`).
     int vocab_size() const;
 
+    // Compute the grammar mask (cached) and clamp every grammar-banned vocab id
+    // to -1e30f in the logits buffer. Ids beyond the vocabulary are treated as
+    // banned (bit absent = not provably allowed).
+    void apply_logit_mask(float* logits, int n_vocab);
+
+    // Check if a single token id is allowed by the current grammar state.
+    // Ensures compute_mask is called first (cached).
+    bool is_allowed(int id) const;
+
 private:
     mutable std::vector<Stack> m_stacks;
     uint32_t m_partial_value = 0;

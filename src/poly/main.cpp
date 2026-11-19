@@ -12,6 +12,7 @@
 #include "strata/poly/conversation_memory.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
+#include "strata/core/grammar_step.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -85,6 +86,7 @@ struct Sampling {
     int penalty_last_n = 0;
     float penalty_repeat = 1.f, penalty_freq = 0.f, penalty_present = 0.f;
     unsigned long long seed = 0;
+    std::string grammar_hex;   // hex-encoded GBNF; validated when the request starts
 };
 
 // llama.cpp's sampler chain in its default order: penalties, top-k, top-p, min-p, temperature, then the draw.
@@ -493,9 +495,30 @@ struct Session {
             repeats.reset();
             repeats.append(history.data(), history.size());
         }
+        // Grammar-constrained decoding: decode only (serial), every pick is
+        // masked to grammar-legal tokens, and the picked token feeds accept.
+        strata::core::GrammarStep gs;
+        std::string gerr;
+        if (!s.grammar_hex.empty()
+            && !gs.set(s.grammar_hex, engine.vocab(), eos, gerr)) {
+            std::printf("ERR grammar: %s\n", gerr.c_str());
+            r.finish = "error: grammar";
+            r.decode_ms = ms_since(t0);
+            return r;
+        }
+        bool grammar_failed = false;
+        std::vector<float> masked;   // scratch for the masked logits copy
         const auto pick = [&](const float* logits) {
             picked_from = logits;
             if (follow && r.produced < (int64_t) follow->size()) return (*follow)[(size_t) r.produced];
+            if (gs.active()) {
+                const int nv = engine.n_vocab();
+                masked.assign(logits, logits + nv);
+                gs.mask(masked.data(), nv);
+                const int32_t t = (int32_t) sampler.pick(masked.data(), nv, s, history, rng);
+                if (!gs.accept(t)) grammar_failed = true;
+                return t;
+            }
             return (int32_t) sampler.pick(logits, engine.n_vocab(), s, history, rng);
         };
         // Shows a token.  False when the answer ends with it.
@@ -504,6 +527,7 @@ struct Session {
             ++r.produced;
             history.push_back(t);
             if (look) repeats.append(t);
+            if (grammar_failed) r.finish = "error: grammar rejected a forced token";
             if (is_eos(t)) r.finish = "stop";
             else if (stop.load()) r.finish = "cancel";
             else return r.produced < max_new;
@@ -531,6 +555,9 @@ struct Session {
                     return guesses.end(in, n, ms_since(round), engine.took_record());
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
+                // grammar-constrained picks are serial: draft tokens are not
+                // grammar-masked, so the fast path is disabled while active.
+                if (gs.active()) use.t = 1;
                 if (ask) {
                     int n_d = 0;
                     for (int32_t from = t; n_d < std::min(most, block_window) - 1 && guesses.wants(n_d); from = d[n_d++]) {
@@ -604,6 +631,7 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
         else if (key == "seed") s.seed = std::strtoull(v, nullptr, 10);
         else if (key == "image_pad") pad = (int32_t) std::atoi(v);
         else if (key == "turn_at") turn_at = std::strtoll(v, nullptr, 10);
+        else if (key == "grammar") s.grammar_hex = v;    // hex-encoded GBNF; validated when the request starts
         // other keys belong to the other engine and are skipped
     }
     pictures.clear();
@@ -635,10 +663,11 @@ int serve(Session& ss) {
     engine.trim();
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
-                "batch_slots=%d engine=" STRATA_VERSION "\n",
+                "batch_slots=%d grammar=%d engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
                 engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
-                (long long) engine.vram_free_mib(), (int) slots.size());
+                (long long) engine.vram_free_mib(), (int) slots.size(),
+                engine.vocab().size() == (size_t)engine.n_vocab() && engine.n_vocab() > 0 ? 1 : 0);
     std::printf("READY %d stop\n", engine.max_context());
     std::fflush(stdout);
 
@@ -834,6 +863,11 @@ int serve(Session& ss) {
             const long long mn = std::strtoll(e1, &e2, 10);
             if (b < 0 || b >= (long) slots.size() || slots[(size_t) b].active || mn < 1 || e2 == e1) {
                 std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", (int) slots.size());
+                std::fflush(stdout);
+                continue;
+            }
+            if (line.find("grammar=") != std::string::npos) {
+                std::printf("ERR grammar: batch requests cannot be grammar-constrained\n");
                 std::fflush(stdout);
                 continue;
             }
