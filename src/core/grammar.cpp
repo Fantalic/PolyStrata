@@ -529,6 +529,74 @@ static void close_stack_set(const std::vector<GrammarRule>& rules,
     }
 }
 
+// ── Character-class chain matching (llama.cpp semantics) ───────────────────
+
+// Walk the position's member chain starting at pos: the element at pos, then
+// subsequent CharAlt/CharRngUpper elements.  For each member:
+//   Char(v), CharNot(v), CharAlt(v) → matches iff byte == v
+//   CharRngUpper(h) → range alternative; preceding element must be Char(lo)
+//                     or CharAlt(lo) and lo <= byte <= h.
+// Positive class (first member is Char): matches iff ANY member matches (OR).
+// Negated class (first member is CharNot): matches iff NO member matches (AND).
+static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
+                          bool negated, uint32_t rule_id) {
+    bool any_matches = false;
+    for (size_t i = pos; i < rule.size(); ++i) {
+        const GrammarElement& elem = rule[i];
+        bool m = false;
+        switch (elem.type) {
+            case ElemType::Char:
+                m = (elem.value == byte);
+                break;
+            case ElemType::CharNot:
+                m = (elem.value == byte);
+                break;
+            case ElemType::CharAlt:
+                m = (elem.value == byte);
+                break;
+            case ElemType::CharRngUpper: {
+                // Range upper bound: preceding element provides lower bound.
+                if (i > 0) {
+                    const GrammarElement& prev = rule[i - 1];
+                    if ((prev.type == ElemType::Char ||
+                         prev.type == ElemType::CharAlt) &&
+                        prev.value <= byte && byte <= elem.value) {
+                        m = true;
+                    }
+                }
+                break;
+            }
+            default:
+                goto done; // stop at non-chain element
+        }
+        // Skip Char/CharNot/CharAlt members whose value is 0 — byte 0 never
+        // occurs in input text, so the member would incorrectly hit on it.
+        if ((elem.type == ElemType::Char ||
+             elem.type == ElemType::CharNot ||
+             elem.type == ElemType::CharAlt) &&
+            elem.value == 0) {
+            continue;
+        }
+        if (m) {
+            any_matches = true;
+            // For positive class, early exit (OR).
+            if (!negated) break;
+        } else if (!negated) {
+            // Positive class: one CharRngUpper that doesn't match — keep
+            // looking (there may be another Char/CharAlt that does).
+        }
+        // Negated class: keep scanning — need ALL members to match.
+    }
+done:
+    bool matched = negated ? !any_matches : any_matches;
+    if (g_trace)
+        std::fprintf(stderr,
+                     "[G] class r%u p%zu byte=0x%02x matched=%d neg=%d\n",
+                     (unsigned)rule_id, pos, (unsigned)byte,
+                     matched ? 1 : 0, negated ? 1 : 0);
+    return matched;
+}
+
 // ── advance_stack (llama.cpp closure model) ───────────────────────────────
 
 void Grammar::advance_stack(const Stack& stack, uint8_t byte,
@@ -536,6 +604,7 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
     // Phase A — CLOSURE: expand RuleRefs (llama.cpp advance_stack).
     std::vector<Stack> closed;
     close_stack_set(m_rules, {stack}, closed);
+    if (g_trace) std::fprintf(stderr, "[G] closed=%zu byte=0x%02x\n", closed.size(), (unsigned)byte);
 
     // Phase B — CONSUME: match byte against closed-stack tops.
     std::vector<Stack> advanced;
@@ -554,12 +623,10 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
 
         switch (elem.type) {
             case ElemType::Char:
-                matched = (elem.value == byte);
+                matched = class_matches(rule, top.pos, byte, false, top.rule_id);
                 break;
             case ElemType::CharNot:
-                matched = (elem.value != byte);
-                if (g_trace) std::fprintf(stderr, "[G] charnot elem.value=%u byte=%u matched=%d rule=r%u pos=%zu\n",
-                                          elem.value, (unsigned)byte, matched ? 1 : 0, top.rule_id, top.pos);
+                matched = class_matches(rule, top.pos, byte, true, top.rule_id);
                 break;
             case ElemType::CharRngUpper:
                 // Needs lower bound from preceding Char in same rule.
@@ -581,7 +648,10 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
                 break;
         }
 
-        if (!matched) continue;
+        if (!matched) {
+            if (g_trace) std::fprintf(stderr, "[G] die r%u p%zu byte=0x%02x\n", top.rule_id, top.pos, (unsigned)byte);
+            continue; // stack dies on mismatch.
+        }
         if (g_trace) std::fprintf(stderr, "[G] match r%u p%zu byte=0x%02x\n", top.rule_id, top.pos, (unsigned)byte);
 
         // Advance past the element and any CharAlt/CharRngUpper suffix chain.
@@ -605,6 +675,17 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
     // FIX 3: close the advanced stacks (RuleRef top gets expanded, empty = accepting).
     std::vector<Stack> reclosed;
     close_stack_set(m_rules, std::move(advanced), reclosed);
+
+    if (g_trace) {
+        std::fprintf(stderr, "[G] adv-out=%zu reclosed=%zu:", advanced.size(), reclosed.size());
+        for (const auto& o : reclosed) {
+            std::fprintf(stderr, " [");
+            for (size_t k = 0; k < o.size(); ++k)
+                std::fprintf(stderr, "%s%u:%zu", k ? "," : "", o[k].rule_id, o[k].pos);
+            std::fprintf(stderr, "]");
+        }
+        std::fprintf(stderr, "\n");
+    }
 
     for (auto& stk : reclosed) {
         out.push_back(std::move(stk));
@@ -735,6 +816,16 @@ void Grammar::accept(int token_id) {
     for (const auto& st : m_stacks)
         if (!st.empty()) walk_from.push_back(st);
     std::vector<Stack> new_stacks;
+    if (g_trace) {
+        std::fprintf(stderr, "[G] accept start tok=%zu walk_from=%zu:", tok.size(), walk_from.size());
+        for (const auto& o : walk_from) {
+            std::fprintf(stderr, " [");
+            for (size_t k = 0; k < o.size(); ++k)
+                std::fprintf(stderr, "%s%u:%zu", k ? "," : "", o[k].rule_id, o[k].pos);
+            std::fprintf(stderr, "]");
+        }
+        std::fprintf(stderr, "\n");
+    }
     for (size_t byte_idx = 0; byte_idx < tok.size(); byte_idx++) {
         uint8_t byte = static_cast<uint8_t>(tok[byte_idx]);
         new_stacks.clear();
@@ -743,6 +834,16 @@ void Grammar::accept(int token_id) {
         }
         std::sort(new_stacks.begin(), new_stacks.end());
         new_stacks.erase(std::unique(new_stacks.begin(), new_stacks.end()), new_stacks.end());
+        if (g_trace) {
+            std::fprintf(stderr, "[G] accept byte=0x%02x walk_from=%zu survivors=%zu:", (unsigned)byte, walk_from.size(), new_stacks.size());
+            for (const auto& o : new_stacks) {
+                std::fprintf(stderr, " [");
+                for (size_t k = 0; k < o.size(); ++k)
+                    std::fprintf(stderr, "%s%u:%zu", k ? "," : "", o[k].rule_id, o[k].pos);
+                std::fprintf(stderr, "]");
+            }
+            std::fprintf(stderr, "\n");
+        }
         if (new_stacks.empty()) {
             // TRACE-REMOVE-AFTER-PHASE1
             // std::cerr << "accept: byte " << std::hex
