@@ -465,6 +465,65 @@ static void test_terminal() {
     }
 }
 
+// --- Test 8: Unicode escapes lower to UTF-8 bytes --------------------------
+
+static void test_unicode_escapes() {
+    // Grammar: "a\u4F60" | [^\u4F60] "\x21"
+    // \u4F60 (你) lowers to UTF-8 bytes E4 BD A0
+    Grammar g;
+    std::string err;
+    if (!Grammar::parse(R"(root ::= "a\u4F60" | [^\u4F60] "\x21")", g, err)) {
+        std::fprintf(stderr, "test 8: parse failed: %s\n", err.c_str());
+        std::exit(1);
+    }
+    // Single-byte tokens to prove byte-level lowering.
+    std::vector<std::string> tokens;
+    tokens.push_back("a");           // 0
+    tokens.push_back(std::string("\xE4", 1));  // 1
+    tokens.push_back(std::string("\xBD", 1));  // 2
+    tokens.push_back(std::string("\xA0", 1));  // 3
+    tokens.push_back("!");           // 4
+    tokens.push_back("");            // 5 EOG
+    g.set_vocab(tokens, {5});
+
+    auto mask = g.allowed_mask();
+    auto has = [&](int id) {
+        return mask[id / 64] & (1ULL << (id % 64));
+    };
+    // "a" (0) and "!" (4) allowed as first bytes of branches 1 and 2.
+    if (!has(0)) { std::fprintf(stderr, "test 8a: 'a' should be allowed\n"); std::exit(1); }
+    if (!has(4)) { std::fprintf(stderr, "test 8b: '!' should be allowed\n"); std::exit(1); }
+    // Continuation bytes must NOT start a valid sequence.
+    if (has(1)) { std::fprintf(stderr, "test 8c: 0xE4 should NOT be allowed\n"); std::exit(1); }
+    if (has(2)) { std::fprintf(stderr, "test 8d: 0xBD should NOT be allowed\n"); std::exit(1); }
+    if (has(3)) { std::fprintf(stderr, "test 8e: 0xA0 should NOT be allowed\n"); std::exit(1); }
+
+    // Walk branch 1: "a" + 你 (E4 BD A0).
+    g.accept(0);  // "a"
+    mask = g.allowed_mask();
+    if (!has(1)) { std::fprintf(stderr, "test 8f: after 'a', 0xE4 should be allowed\n"); std::exit(1); }
+    g.accept(1);  // 0xE4
+    mask = g.allowed_mask();
+    if (!has(2)) { std::fprintf(stderr, "test 8g: after 0xE4, 0xBD should be allowed\n"); std::exit(1); }
+    g.accept(2);  // 0xBD
+    mask = g.allowed_mask();
+    if (!has(3)) { std::fprintf(stderr, "test 8h: after 0xBD, 0xA0 should be allowed\n"); std::exit(1); }
+    g.accept(3);  // 0xA0
+    if (!g.accepting()) { std::fprintf(stderr, "test 8i: should be accepting after full branch 1\n"); std::exit(1); }
+    mask = g.allowed_mask();
+    if (!(mask[5 / 64] & (1ULL << (5 % 64)))) { std::fprintf(stderr, "test 8j: EOG should be allowed\n"); std::exit(1); }
+
+    // Walk branch 2: [^\u4F60] "\x21" — "!" + "!".
+    Grammar g2;
+    Grammar::parse(R"(root ::= "a\u4F60" | [^\u4F60] "\x21")", g2, err);
+    g2.set_vocab(tokens, {5});
+    g2.accept(4);  // "!" matches [^\u4F60]
+    mask = g2.allowed_mask();
+    if (!(mask[4 / 64] & (1ULL << (4 % 64)))) { std::fprintf(stderr, "test 8k: after '!', '!' should be allowed\n"); std::exit(1); }
+    g2.accept(4);  // "!" matches "\x21"
+    if (!g2.accepting()) { std::fprintf(stderr, "test 8l: should be accepting after full branch 2\n"); std::exit(1); }
+}
+
 // --- Main -----------------------------------------------------------------
 
 int main() {
@@ -490,6 +549,9 @@ int main() {
 
     test_terminal();
     std::puts("  test 7: terminal behavior — passed");
+
+    test_unicode_escapes();
+    std::puts("  test 8: unicode escapes — passed");
 
     std::puts("grammar_test: all tests passed");
     return 0;

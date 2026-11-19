@@ -62,7 +62,25 @@ static int utf8_byte_count(uint32_t cp) {
     return 4;
 }
 
-
+static int utf8_encode(uint32_t cp, uint8_t* bytes) {
+    if (cp <= 0x7F) { bytes[0] = static_cast<uint8_t>(cp); return 1; }
+    if (cp <= 0x7FF) {
+        bytes[0] = 0xC0 | static_cast<uint8_t>(cp >> 6);
+        bytes[1] = 0x80 | static_cast<uint8_t>(cp & 0x3F);
+        return 2;
+    }
+    if (cp <= 0xFFFF) {
+        bytes[0] = 0xE0 | static_cast<uint8_t>(cp >> 12);
+        bytes[1] = 0x80 | static_cast<uint8_t>((cp >> 6) & 0x3F);
+        bytes[2] = 0x80 | static_cast<uint8_t>(cp & 0x3F);
+        return 3;
+    }
+    bytes[0] = 0xF0 | static_cast<uint8_t>(cp >> 18);
+    bytes[1] = 0x80 | static_cast<uint8_t>((cp >> 12) & 0x3F);
+    bytes[2] = 0x80 | static_cast<uint8_t>((cp >> 6) & 0x3F);
+    bytes[3] = 0x80 | static_cast<uint8_t>(cp & 0x3F);
+    return 4;
+}
 
 // ── Grammar parser helpers (free functions, called from member parse()) ──
 
@@ -143,7 +161,15 @@ static void parse_quoted(std::string_view src, size_t& i,
     while (i < src.size() && src[i] != q) {
         uint32_t cp = parse_char_val(src, i, err);
         if (!err.empty()) return;
-        out->push_back({ElemType::Char, cp});
+        if (cp > 0xFF) {
+            // Codepoint escape (e.g. \uXXXX): lower to its UTF-8 bytes so each
+            // element matches one token byte.
+            uint8_t seq[4];
+            int n = utf8_encode(cp, seq);
+            for (int b = 0; b < n; ++b) out->push_back({ElemType::Char, seq[b]});
+        } else {
+            out->push_back({ElemType::Char, cp});
+        }
     }
     if (i >= src.size()) { err = "unterminated string"; return; }
     i++; // closing quote
@@ -162,11 +188,26 @@ static void parse_char_class(std::string_view src, size_t& i,
             i++; // skip '-'
             uint32_t hi = parse_char_val(src, i, err);
             if (!err.empty()) return;
+            if (lo > 0xFF || hi > 0xFF) {
+                err = "class ranges on codepoints > 0xFF are not supported; "
+                      "use raw characters or byte ranges";
+                return;
+            }
             out->push_back({base, lo});
             out->push_back({ElemType::CharRngUpper, hi});
         } else {
-            out->push_back({base, lo});
-            out->push_back({ElemType::CharAlt, 0});
+            if (lo > 0xFF) {
+                // Codepoint escape in char class: lower to UTF-8 bytes.
+                uint8_t seq[4];
+                int n = utf8_encode(lo, seq);
+                for (int b = 0; b < n; ++b) {
+                    out->push_back({base, seq[b]});
+                    out->push_back({ElemType::CharAlt, 0});
+                }
+            } else {
+                out->push_back({base, lo});
+                out->push_back({ElemType::CharAlt, 0});
+            }
         }
     }
     if (i >= src.size()) { err = "unterminated char class"; return; }
@@ -363,11 +404,27 @@ void Grammar::set_vocab(std::vector<std::string> token_bytes, std::vector<int> e
     m_n_remain = 0;
     m_cache.clear();
 
-    // Initialise stacks from the root rule (rule 0).
+    // Initialise stacks from the root rule (rule 0). Rule 0 is never expanded
+    // via a RuleRef, so its own alternatives must be enumerated here: one
+    // stack per alternative start (an Alt separator or the rule end), plus an
+    // empty stack for a trailing empty alternative (accepting from the start).
     m_stacks.clear();
-    Stack s;
-    s.push_back({0, 0});
-    m_stacks.push_back(std::move(s));
+    {
+        const GrammarRule& root = m_rules[0];
+        size_t alt_start = 0;
+        for (size_t s = 0; s <= root.size(); ++s) {
+            const bool boundary = (s == root.size()) || root[s].type == ElemType::Alt;
+            if (!boundary) continue;
+            if (alt_start < s) {
+                Stack st;
+                st.push_back({0, alt_start});
+                m_stacks.push_back(std::move(st));
+            } else {
+                m_stacks.push_back(Stack{}); // empty alternative = accepting
+            }
+            alt_start = s + 1;
+        }
+    }
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // RUNTIME — llama.cpp stack model (replaces lines 370-653)
@@ -506,6 +563,7 @@ static void close_stack_set(const std::vector<GrammarRule>& rules,
 // the first element past the whole member chain (or pos+1 for a lone char).
 static size_t class_advance_end(const GrammarRule& rule, size_t pos) {
     size_t i = pos;
+    bool first = true;
     while (i < rule.size()) {
         const GrammarElement& e = rule[i];
         if (e.type != ElemType::Char && e.type != ElemType::CharNot) break;
@@ -513,51 +571,49 @@ static size_t class_advance_end(const GrammarRule& rule, size_t pos) {
             const GrammarElement& n = rule[i + 1];
             if (n.type == ElemType::CharRngUpper || n.type == ElemType::CharAlt) {
                 i += 2; // member unit consumed (terminator or range pair)
+                first = false;
                 continue;
             }
         }
-        ++i; // lone literal char (or unterminated trailing member)
-        break;
+        if (first) ++i; // lone char AS the matched position: advance past it
+        break;          // a later lone char is the next element, not a member
     }
     return i;
 }
 
 static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
-                           bool negated) {
+                          bool negated) {
     bool any_matches = false;
     size_t i = pos;
+    bool first = true;
     while (i < rule.size()) {
         const GrammarElement& e = rule[i];
         if (e.type != ElemType::Char && e.type != ElemType::CharNot) break;
-        bool hit = false;
         if (i + 1 < rule.size()) {
             const GrammarElement& n = rule[i + 1];
             if (n.type == ElemType::CharRngUpper) {
-                hit = (e.value <= byte && byte <= n.value);
+                if (e.value <= byte && byte <= n.value) any_matches = true;
                 i += 2;
+                first = false;
             } else if (n.type == ElemType::CharAlt) {
-                hit = (e.value == byte);
-                i += 2;
-            } else {
-                // Lone literal char member: accumulate BEFORE the break — the
-                // `if (hit)` block below is skipped once we leave the loop.
                 if (e.value == byte) any_matches = true;
+                i += 2;
+                first = false;
+            } else {
+                // Lone literal char: a member only when it IS the matched
+                // position; a later lone char is the next element, not ours.
+                if (first && e.value == byte) any_matches = true;
                 ++i;
                 break;
             }
         } else {
-            if (e.value == byte) any_matches = true;
+            if (first && e.value == byte) any_matches = true;
             ++i;
             break;
         }
-        if (hit) {
-            any_matches = true;
-            if (!negated) break; // positive: one hit decides (OR)
-        }
-        // Negated class: keep scanning — the match needs NO member to hit.
+        if (any_matches && !negated) break; // positive: one hit decides (OR)
     }
-    const bool matched = negated ? !any_matches : any_matches;
-    return matched;
+    return negated ? !any_matches : any_matches;
 }
 
 // ── advance_stack (llama.cpp closure model) ───────────────────────────────
