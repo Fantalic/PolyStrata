@@ -20,21 +20,26 @@
 //   whose first byte is a continuation byte (0x80-0xBF) is allowed only
 //   when m_n_remain > 0.
 //
-// Repetition (* + ?) is handled during parsing by duplicating the matched
-// element(s) in the rule; the duplicated copy creates the loop so the PDA
-// can re-visit the first copy.  An Alt element is appended for * and ?.
+// Repetition (* + ?) is handled during parsing by synthesizing auxiliary
+// rules via the grammar-rule vector.  Each quantifier gets a new rule id;
+// the parent rule receives a RuleRef to it instead of duplicated atoms.
+// The runtime splits on Alt separators for alternatives and RuleRefs.
 
 #include "strata/core/grammar.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+static const bool g_trace = std::getenv("STRATA_GRAMMAR_TRACE") != nullptr;
 
 namespace strata::core {
 
@@ -88,10 +93,12 @@ static int utf8_encode(uint32_t cp, uint8_t* bytes) {
 static void parse_alternatives(std::string_view src, size_t& i,
                                std::vector<GrammarElement>* out,
                                std::unordered_map<std::string, size_t>* name_to_id,
+                               std::vector<GrammarRule>* rules,
                                std::string& err);
 static void parse_alternative(std::string_view src, size_t& i,
                                std::vector<GrammarElement>* out,
                                std::unordered_map<std::string, size_t>* name_to_id,
+                               std::vector<GrammarRule>* rules,
                                std::string& err);
 
 static void skip_ws(std::string_view src, size_t& i) {
@@ -192,11 +199,13 @@ static void parse_char_class(std::string_view src, size_t& i,
 static void parse_group(std::string_view src, size_t& i,
                         std::vector<GrammarElement>* out,
                         std::unordered_map<std::string, size_t>* name_to_id,
+                        std::vector<GrammarRule>* rules,
                         std::string& err);
 
 static void parse_element(std::string_view src, size_t& i,
                           std::vector<GrammarElement>* out,
                           std::unordered_map<std::string, size_t>* name_to_id,
+                          std::vector<GrammarRule>* rules,
                           std::string& err) {
     if (i >= src.size()) { err = "unexpected end"; return; }
     size_t start = out->size();
@@ -204,7 +213,7 @@ static void parse_element(std::string_view src, size_t& i,
     if (c == '"') parse_quoted(src, i, out, err);
     else if (c == '\'') parse_quoted(src, i, out, err);
     else if (c == '[') parse_char_class(src, i, out, err);
-    else if (c == '(') parse_group(src, i, out, name_to_id, err);
+    else if (c == '(') parse_group(src, i, out, name_to_id, rules, err);
     else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
         size_t ns = i;
         while (i < src.size() && (std::isalnum(static_cast<unsigned char>(src[i])) || src[i] == '_')) i++;
@@ -217,20 +226,41 @@ static void parse_element(std::string_view src, size_t& i,
 
     if (i < src.size() && (src[i] == '*' || src[i] == '+' || src[i] == '?')) {
         char rep = src[i++];
-        size_t end = out->size();
-        for (size_t j = start; j < end; j++)
-            out->push_back(out->operator[](j));
-        if (rep == '*' || rep == '?')
-            out->push_back({ElemType::Alt, 0});
+        const size_t atoms_begin = start;
+        const size_t atoms_end = out->size();
+        const uint32_t aux_id = static_cast<uint32_t>(rules->size());
+        rules->emplace_back();
+        std::vector<GrammarElement>& aux = rules->back();
+        if (rep == '?') {
+            // S' ::= S |      (empty last alternative = zero path)
+            aux.assign(out->begin() + static_cast<long>(atoms_begin), out->end());
+            aux.push_back({ElemType::Alt, 0});
+            out->erase(out->begin() + static_cast<long>(atoms_begin), out->end());
+            out->push_back({ElemType::RuleRef, aux_id});
+        } else if (rep == '*') {
+            // S' ::= S S' |   (zero or more)
+            aux.assign(out->begin() + static_cast<long>(atoms_begin), out->end());
+            aux.push_back({ElemType::RuleRef, aux_id});
+            aux.push_back({ElemType::Alt, 0});
+            out->erase(out->begin() + static_cast<long>(atoms_begin), out->end());
+            out->push_back({ElemType::RuleRef, aux_id});
+        } else { // '+'
+            // S S'  with  S' ::= S S' |   (one or more)
+            aux.assign(out->begin() + static_cast<long>(atoms_begin), out->end());
+            aux.push_back({ElemType::RuleRef, aux_id});
+            aux.push_back({ElemType::Alt, 0});
+            out->push_back({ElemType::RuleRef, aux_id});   // atoms stay in the parent
+        }
     }
 }
 
 static void parse_group(std::string_view src, size_t& i,
                         std::vector<GrammarElement>* out,
                         std::unordered_map<std::string, size_t>* name_to_id,
+                        std::vector<GrammarRule>* rules,
                         std::string& err) {
     i++; // skip (
-    parse_alternatives(src, i, out, name_to_id, err);
+    parse_alternatives(src, i, out, name_to_id, rules, err);
     if (!err.empty()) return;
     if (i >= src.size() || src[i] != ')') { err = "unbalanced paren"; return; }
     i++; // skip )
@@ -239,10 +269,12 @@ static void parse_group(std::string_view src, size_t& i,
 static void parse_alternative(std::string_view src, size_t& i,
                               std::vector<GrammarElement>* out,
                               std::unordered_map<std::string, size_t>* name_to_id,
+                              std::vector<GrammarRule>* rules,
                               std::string& err) {
     while (i < src.size() && src[i] != '|' && src[i] != ')' && src[i] != '\n') {
         skip_ws(src, i);
-        parse_element(src, i, out, name_to_id, err);
+        if (i >= src.size() || src[i] == '|' || src[i] == ')' || src[i] == '\n') break;
+        parse_element(src, i, out, name_to_id, rules, err);
         if (!err.empty()) return;
     }
 }
@@ -250,10 +282,16 @@ static void parse_alternative(std::string_view src, size_t& i,
 static void parse_alternatives(std::string_view src, size_t& i,
                                std::vector<GrammarElement>* out,
                                std::unordered_map<std::string, size_t>* name_to_id,
+                               std::vector<GrammarRule>* rules,
                                std::string& err) {
-    parse_alternative(src, i, out, name_to_id, err);
+    parse_alternative(src, i, out, name_to_id, rules, err);
     if (!err.empty()) return;
-    while (i < src.size() && src[i] == '|') { i++; parse_alternative(src, i, out, name_to_id, err); if (!err.empty()) return; }
+    while (i < src.size() && src[i] == '|') {
+        i++;
+        out->push_back({ElemType::Alt, 0});
+        parse_alternative(src, i, out, name_to_id, rules, err);
+        if (!err.empty()) return;
+    }
 }
 
 // ── Grammar::parse ────────────────────────────────────────────────────────
@@ -295,7 +333,7 @@ bool Grammar::parse(const std::string& gbnf, Grammar& out, std::string& error) {
     }
 
     // Second pass: full parse.
-    out.m_rules.clear();
+    out.m_rules.assign(names.size(), {});   // named rules at first-pass ids; aux append after
     std::unordered_map<std::string, size_t> nm2(names); // copy
     size_t pi = 0;
     while (pi < gbnf.size()) {
@@ -311,12 +349,9 @@ bool Grammar::parse(const std::string& gbnf, Grammar& out, std::string& error) {
         if (pi + 3 > gbnf.size() || gbnf[pi] != ':' || gbnf[pi+1] != ':' || gbnf[pi+2] != '=') { error = "expected ::= (pass 2 at " + std::to_string(pi) + ")"; return false; }
         pi += 3;
 
-        size_t rid = out.m_rules.size();
-        out.m_rules.emplace_back();
-        // rule ids were assigned by the first pass (same scan order)
-
+        const size_t rid = names[nm];   // first-pass id (scan order matches)
         std::vector<GrammarElement> elems;
-        parse_alternatives(gbnf, pi, &elems, &nm2, error);
+        parse_alternatives(gbnf, pi, &elems, &nm2, &out.m_rules, error);
         if (!error.empty()) return false;
         elems.push_back({ElemType::End, 0});
         out.m_rules[rid] = std::move(elems);
@@ -325,6 +360,8 @@ bool Grammar::parse(const std::string& gbnf, Grammar& out, std::string& error) {
         // leftmost position (start of the rule or right after an Alt
         // separator, before any consuming element of that alternative).
         // Forward references to later rules are legal.
+        // Aux rules (created by quantifiers) are appended later and are
+        // not checked here — their self-references are non-leftmost.
         {
             bool left = true;
             for (const auto& e : out.m_rules[rid]) {
@@ -366,17 +403,38 @@ void Grammar::set_vocab(std::vector<std::string> token_bytes, std::vector<int> e
     s.push_back({0, 0});
     m_stacks.push_back(std::move(s));
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// RUNTIME — llama.cpp stack model (replaces lines 370-653)
+// ═══════════════════════════════════════════════════════════════════════════
 
 // ── match_char ────────────────────────────────────────────────────────────
 
-bool Grammar::match_char(const GrammarElement* pos, uint32_t cp) const {
-    switch (pos->type) {
-        case ElemType::Char: return pos->value == cp;
-        case ElemType::CharNot: return pos->value != cp;
-        case ElemType::CharRngUpper: return false; // needs lower bound from caller
-        case ElemType::CharAlt: return true; // neutral separator
-        default: return false;
-    }
+bool Grammar::match_char(const GrammarElement* pos, uint32_t chr) const {
+    // llama.cpp-style: Char exact / CharNot / CharRngUpper (with preceding
+    // Char as lower bound) / CharAlt chains.
+    bool found = false;
+    bool is_positive = (pos->type == ElemType::Char || pos->type == ElemType::CharNot);
+
+    do {
+        if (pos->type == ElemType::CharRngUpper) {
+            // This shouldn't be called with CharRngUpper on top; the caller
+            // should pass the preceding Char element as the lower bound.
+            found = false;
+            pos++;
+        } else if (pos->type == ElemType::Char) {
+            found = (pos->value == chr);
+            pos++;
+        } else if (pos->type == ElemType::CharNot) {
+            found = (pos->value != chr);
+            pos++;
+        } else if (pos->type == ElemType::CharAlt) {
+            pos++;
+        } else {
+            break;
+        }
+    } while (pos->type == ElemType::CharAlt);
+
+    return found == is_positive;
 }
 
 // ── match_partial_char ────────────────────────────────────────────────────
@@ -388,105 +446,168 @@ bool Grammar::match_partial_char(const GrammarElement* pos) const {
     return utf8_byte_count(cp) > 1;
 }
 
-// ── token helper functions ────────────────────────────────────────────────
+// ── close_stack_set (extracted Phase A) ───────────────────────────────────
 
-static bool token_matches_char(const std::string& tok, uint32_t cp) {
-    int need = utf8_byte_count(cp);
-    if (static_cast<int>(tok.size()) == need) {
-        uint8_t enc[4];
-        utf8_encode(cp, enc);
-        return std::memcmp(tok.data(), enc, need) == 0;
-    }
-    if (static_cast<int>(tok.size()) < need && tok.size() == 1) {
-        uint8_t enc[4];
-        utf8_encode(cp, enc);
-        return static_cast<uint8_t>(tok[0]) == enc[0];
-    }
-    return false;
-}
+static void close_stack_set(const std::vector<GrammarRule>& rules,
+                            std::vector<Stack> input,
+                            std::vector<Stack>& out) {
+    // Expand RuleRefs / skip Alts / pop Ends until every stack's top is a
+    // consuming element or the stack is empty (rule complete = accepting).
+    std::vector<Stack> todo = std::move(input);
+    std::set<Stack> seen;
+    for (auto& stk : todo) seen.insert(stk);
 
-static bool token_matches_char_not(const std::string& tok, uint32_t cp) {
-    int need = utf8_byte_count(cp);
-    if (static_cast<int>(tok.size()) == need) {
-        uint8_t enc[4];
-        utf8_encode(cp, enc);
-        return std::memcmp(tok.data(), enc, need) != 0;
-    }
-    if (static_cast<int>(tok.size()) < need && tok.size() == 1) {
-        uint8_t enc[4];
-        utf8_encode(cp, enc);
-        return static_cast<uint8_t>(tok[0]) != enc[0];
-    }
-    return true; // token longer than negated char encoding — it's different
-}
-
-static bool token_matches_range(const std::string& tok, uint32_t lower_cp, uint32_t upper_cp) {
-    if (tok.empty()) return false;
-    uint8_t first = static_cast<uint8_t>(tok[0]);
-    if (first <= 0x7F) {
-        return first >= static_cast<uint8_t>(lower_cp) &&
-               first <= static_cast<uint8_t>(upper_cp);
-    }
-    // For multi-byte: check if any codepoint in range has this leading byte.
-    for (uint32_t cp = lower_cp; cp <= upper_cp && cp <= 0x10FFFF; cp++) {
-        int need = utf8_byte_count(cp);
-        if (need == 1) {
-            if (static_cast<uint8_t>(cp) == first) return true;
-        } else {
-            uint8_t enc[4];
-            utf8_encode(cp, enc);
-            if (enc[0] == first) return true;
-        }
-    }
-    return false;
-}
-
-bool Grammar::match_token(const GrammarElement* pos, uint32_t token_id) const {
-    if (token_id >= static_cast<uint32_t>(m_vocab_size)) return false;
-    const std::string& tok = m_tokens[token_id];
-    if (tok.empty()) return false;
-
-    switch (pos->type) {
-        case ElemType::Char: return token_matches_char(tok, pos->value);
-        case ElemType::CharNot: return token_matches_char_not(tok, pos->value);
-        case ElemType::CharRngUpper: return false; // handled in compute_mask
-        case ElemType::CharAlt: return false;
-        case ElemType::RuleRef: return false;
-        case ElemType::End: case ElemType::Alt: return false;
-        default: return false;
-    }
-}
-
-// ── advance_stack ─────────────────────────────────────────────────────────
-
-void Grammar::advance_stack(const Stack& stack, uint8_t byte, std::vector<Stack>& out) const {
-    if (stack.empty()) return;
-    const StackElem& top = stack.back();
-    const GrammarRule& rule = m_rules[top.rule_id];
-    if (top.pos >= rule.size()) return;
-
-    const GrammarElement& elem = rule[top.pos];
-    Stack ns(stack);
-
-    switch (elem.type) {
-        case ElemType::End:
-            if (stack.size() > 1) { ns.pop_back(); out.push_back(std::move(ns)); }
-            break;
-        case ElemType::Alt: {
-            size_t nxt = top.pos + 1;
-            if (nxt < rule.size()) { ns.back().pos = nxt; out.push_back(std::move(ns)); }
+    size_t steps = 0;
+    while (!todo.empty()) {
+        if (++steps > 100000) {
+            if (g_trace) std::fprintf(stderr, "[G] closure step cap hit\n");
             break;
         }
-        case ElemType::RuleRef: {
-            ns.push_back({elem.value, 0});
-            out.push_back(std::move(ns));
-            break;
+        Stack curr = std::move(todo.back());
+        todo.pop_back();
+        if (g_trace) std::fprintf(stderr, "[G] clos todo=%zu depth_top=r%u p%zu\n", todo.size(), curr.empty() ? 0u : curr.back().rule_id, curr.empty() ? 0u : curr.back().pos);
+
+        if (curr.empty()) { out.push_back(std::move(curr)); continue; }
+
+        const StackElem top = curr.back();
+        const GrammarRule& rule = rules[top.rule_id];
+
+        // FIX 2: past-end — pop and CONTINUE closure (don't drop parent remainder).
+        if (top.pos >= rule.size()) {
+            curr.pop_back();
+            if (curr.empty()) {
+                out.push_back(std::move(curr));
+            } else if (seen.insert(curr).second) {
+                todo.push_back(std::move(curr));
+            }
+            continue;
         }
-        default: {
-            ns.back().pos++;
-            out.push_back(std::move(ns));
-            break;
+
+        const GrammarElement& elem = rule[top.pos];
+        if (elem.type == ElemType::RuleRef) {
+            const GrammarRule& ref_rule = rules[elem.value];
+            Stack parent = curr;
+            parent.pop_back();
+            if (top.pos + 1 < rule.size()) {
+                const GrammarElement& nxt = rule[top.pos + 1];
+                if (nxt.type != ElemType::End && nxt.type != ElemType::Alt)
+                    parent.push_back({top.rule_id, top.pos + 1});
+            }
+            if (g_trace) std::fprintf(stderr, "[G] expand RR->r%u forks:\n", elem.value);
+            size_t alt_start = 0;
+            for (size_t s = 0; s <= ref_rule.size(); ++s) {
+                bool boundary = (s == ref_rule.size()) || ref_rule[s].type == ElemType::Alt;
+                if (!boundary) continue;
+                Stack fork = parent;
+                if (alt_start < s) fork.push_back({elem.value, alt_start});
+                bool fresh = seen.insert(fork).second;
+                if (g_trace && fresh) std::fprintf(stderr, "[G]   fork r%u p%zu%s\n", elem.value, alt_start, (alt_start < s) ? "" : " (empty-alt)");
+                if (fresh) todo.push_back(std::move(fork));
+                alt_start = s + 1;
+            }
+            continue;
         }
+        if (elem.type == ElemType::Alt) {
+            curr.back().pos++;
+            if (seen.insert(curr).second)
+                todo.push_back(std::move(curr));
+            continue;
+        }
+        if (elem.type == ElemType::End) {
+            curr.pop_back();
+            while (!curr.empty()) {
+                const StackElem& t2 = curr.back();
+                const GrammarRule& r2 = rules[t2.rule_id];
+                if (t2.pos < r2.size() && r2[t2.pos].type == ElemType::End) curr.pop_back();
+                else break;
+            }
+            if (seen.insert(curr).second)
+                todo.push_back(std::move(curr));
+            continue;
+        }
+        out.push_back(std::move(curr));
+    }
+}
+
+// ── advance_stack (llama.cpp closure model) ───────────────────────────────
+
+void Grammar::advance_stack(const Stack& stack, uint8_t byte,
+                            std::vector<Stack>& out) const {
+    // Phase A — CLOSURE: expand RuleRefs (llama.cpp advance_stack).
+    std::vector<Stack> closed;
+    close_stack_set(m_rules, {stack}, closed);
+
+    // Phase B — CONSUME: match byte against closed-stack tops.
+    std::vector<Stack> advanced;
+    for (const auto& stk : closed) {
+        // Empty stacks are accepting — pass through unchanged.
+        if (stk.empty()) { advanced.push_back(stk); continue; }
+
+        const StackElem& top = stk.back();
+        const GrammarRule& rule = m_rules[top.rule_id];
+        if (top.pos >= rule.size()) { advanced.push_back(stk); continue; }
+
+        const GrammarElement& elem = rule[top.pos];
+
+        bool matched = false;
+        size_t advance_pos = top.pos + 1;
+
+        switch (elem.type) {
+            case ElemType::Char:
+                matched = (elem.value == byte);
+                break;
+            case ElemType::CharNot:
+                matched = (elem.value != byte);
+                if (g_trace) std::fprintf(stderr, "[G] charnot elem.value=%u byte=%u matched=%d rule=r%u pos=%zu\n",
+                                          elem.value, (unsigned)byte, matched ? 1 : 0, top.rule_id, top.pos);
+                break;
+            case ElemType::CharRngUpper:
+                // Needs lower bound from preceding Char in same rule.
+                if (top.pos > 0) {
+                    const GrammarElement& prev = rule[top.pos - 1];
+                    matched = (prev.type == ElemType::Char || prev.type == ElemType::CharNot)
+                           && byte >= prev.value && byte <= elem.value;
+                }
+                break;
+            case ElemType::Token:
+                matched = (elem.value == byte);
+                break;
+            case ElemType::TokenNot:
+                matched = (elem.value != byte);
+                break;
+            default:
+                // End/Alt/RuleRef/CharAlt — shouldn't appear on closed stack.
+                matched = false;
+                break;
+        }
+
+        if (!matched) continue;
+        if (g_trace) std::fprintf(stderr, "[G] match r%u p%zu byte=0x%02x\n", top.rule_id, top.pos, (unsigned)byte);
+
+        // Advance past the element and any CharAlt/CharRngUpper suffix chain.
+        while (advance_pos < rule.size() &&
+               (rule[advance_pos].type == ElemType::CharAlt ||
+                rule[advance_pos].type == ElemType::CharRngUpper)) {
+            advance_pos++;
+        }
+
+        Stack advanced_stack(stk.begin(), stk.end() - 1);
+        // FIX 1: push next position ONLY when NOT End/Alt (else element is dropped).
+        if (advance_pos < rule.size()) {
+            const GrammarElement& next_elem = rule[advance_pos];
+            if (next_elem.type != ElemType::End && next_elem.type != ElemType::Alt) {
+                advanced_stack.push_back({top.rule_id, advance_pos});
+            }
+        }
+        advanced.push_back(std::move(advanced_stack));
+    }
+
+    // FIX 3: close the advanced stacks (RuleRef top gets expanded, empty = accepting).
+    std::vector<Stack> reclosed;
+    close_stack_set(m_rules, std::move(advanced), reclosed);
+
+    for (auto& stk : reclosed) {
+        out.push_back(std::move(stk));
     }
 }
 
@@ -495,43 +616,46 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte, std::vector<Stack>
 void Grammar::compute_mask() const {
     m_mask.assign((m_vocab_size + 63) / 64, 0ULL);
 
-    // Check cache.
+    // Cache lookup.
     CacheKey key{m_stacks, m_partial_value, m_n_remain};
     auto it = m_cache.find(key);
     if (it != m_cache.end()) { m_mask = it->second; m_mask_valid = true; return; }
 
     for (const auto& stack : m_stacks) {
-        if (stack.empty()) continue;
+        // EOG allowed iff any live stack is empty (accepting).
+        if (stack.empty()) {
+            for (int tid = 0; tid < m_vocab_size; tid++) {
+                if (m_tokens[tid].empty())
+                    m_mask[tid / 64] |= (1ULL << (tid % 64));
+            }
+            continue;
+        }
+
         const StackElem& top = stack.back();
         const GrammarRule& rule = m_rules[top.rule_id];
         if (top.pos >= rule.size()) continue;
 
         const GrammarElement& elem = rule[top.pos];
 
-        // EOG allowed when grammar can end (End or Alt at top).
-        bool can_end = (elem.type == ElemType::End || elem.type == ElemType::Alt);
-
         for (int tid = 0; tid < m_vocab_size; tid++) {
             const std::string& tok = m_tokens[tid];
+            if (tok.empty()) continue; // EOG handled above.
 
-            // EOG tokens.
-            if (tok.empty()) {
-                if (can_end) m_mask[tid / 64] |= (1ULL << (tid % 64));
-                continue;
+            // Continuation-byte tokens: allowed ONLY when m_n_remain > 0.
+            // When m_n_remain == 0 a lone continuation byte is illegal.
+            if ((static_cast<uint8_t>(tok[0]) & 0xC0) == 0x80) {
+                if (m_n_remain == 0) continue;
             }
-
             // Continuation-byte tokens: allowed when m_n_remain > 0
             // and the grammar element expects a multi-byte char.
-            bool is_cont = (static_cast<uint8_t>(tok[0]) & 0xC0) == 0x80;
-            if (is_cont && m_n_remain > 0) {
+            if ((static_cast<uint8_t>(tok[0]) & 0xC0) == 0x80 && m_n_remain > 0) {
                 switch (elem.type) {
                     case ElemType::Char:
                     case ElemType::CharNot:
                         if (utf8_byte_count(elem.value) > 1)
                             m_mask[tid / 64] |= (1ULL << (tid % 64));
                         break;
-                    case ElemType::CharRngUpper: {
-                        // Check if any codepoint in [lower, upper] is multi-byte.
+                    case ElemType::CharRngUpper:
                         if (top.pos > 0) {
                             const GrammarElement& prev = rule[top.pos - 1];
                             if (prev.type == ElemType::Char || prev.type == ElemType::CharNot) {
@@ -544,33 +668,30 @@ void Grammar::compute_mask() const {
                             }
                         }
                         break;
-                    }
                     default: break;
                 }
                 continue;
             }
 
-            // Normal tokens.
-            switch (elem.type) {
-                case ElemType::Char:
-                    if (token_matches_char(tok, elem.value))
-                        m_mask[tid / 64] |= (1ULL << (tid % 64));
-                    break;
-                case ElemType::CharNot:
-                    if (token_matches_char_not(tok, elem.value))
-                        m_mask[tid / 64] |= (1ULL << (tid % 64));
-                    break;
-                case ElemType::CharRngUpper: {
-                    if (top.pos > 0) {
-                        const GrammarElement& prev = rule[top.pos - 1];
-                        if (prev.type == ElemType::Char || prev.type == ElemType::CharNot)
-                            if (token_matches_range(tok, prev.value, elem.value))
-                                m_mask[tid / 64] |= (1ULL << (tid % 64));
-                    }
-                    break;
+            // Normal tokens: walk ALL bytes through a fresh copy of the
+            // current stack set via advance_stack (dedup sort+unique after
+            // each byte); allowed iff every byte consumed and ≥1 stack survives.
+            std::vector<Stack> walk_stacks;
+            for (const auto& st : m_stacks)
+                if (!st.empty()) walk_stacks.push_back(st);
+            bool ok = true;
+            for (size_t bi = 0; bi < tok.size(); bi++) {
+                std::vector<Stack> next_walk;
+                for (const auto& ws : walk_stacks) {
+                    advance_stack(ws, static_cast<uint8_t>(tok[bi]), next_walk);
                 }
-                default: break;
+                // Dedup.
+                std::sort(next_walk.begin(), next_walk.end());
+                next_walk.erase(std::unique(next_walk.begin(), next_walk.end()), next_walk.end());
+                if (next_walk.empty()) { ok = false; break; }
+                walk_stacks = std::move(next_walk);
             }
+            if (ok) m_mask[tid / 64] |= (1ULL << (tid % 64));
         }
     }
 
@@ -582,7 +703,6 @@ void Grammar::compute_mask() const {
 
 const std::vector<unsigned long long>& Grammar::allowed_mask() {
     if (m_terminal) {
-        // Return an all-zero mask (static to avoid reallocation).
         static thread_local std::vector<unsigned long long> empty;
         if (empty.empty()) empty.assign((m_vocab_size + 63) / 64, 0ULL);
         return empty;
@@ -607,29 +727,45 @@ void Grammar::accept(int token_id) {
     for (int eid : m_eog_ids)
         if (eid == token_id) { m_terminal = true; m_mask_valid = false; return; }
 
-    // Advance all stacks.
-    std::vector<Stack> new_stacks;
-    for (const auto& stk : m_stacks)
-        advance_stack(stk, 0, new_stacks); // byte unused by the baseline runtime; the new runtime uses it
-
-    // Update partial UTF-8 state.
+    // Advance all stacks byte-by-byte, committing the final stack set.
     const std::string& tok = m_tokens[token_id];
-    if (!tok.empty()) {
-        uint8_t first = static_cast<uint8_t>(tok[0]);
-        // Check if this starts a multi-byte sequence.
-        if ((first & 0xE0) == 0xC0 || (first & 0xF0) == 0xE0 || (first & 0xF8) == 0xF0) {
-            int bytes = utf8_byte_count(first);
-            if (static_cast<int>(tok.size()) < bytes) {
-                m_partial_value = first;
-                m_n_remain = bytes - 1;
-            } else {
-                m_partial_value = 0;
-                m_n_remain = 0;
-            }
+    if (tok.empty()) return;
+
+    std::vector<Stack> walk_from;
+    for (const auto& st : m_stacks)
+        if (!st.empty()) walk_from.push_back(st);
+    std::vector<Stack> new_stacks;
+    for (size_t byte_idx = 0; byte_idx < tok.size(); byte_idx++) {
+        uint8_t byte = static_cast<uint8_t>(tok[byte_idx]);
+        new_stacks.clear();
+        for (const auto& stk : walk_from) {
+            advance_stack(stk, byte, new_stacks);
+        }
+        std::sort(new_stacks.begin(), new_stacks.end());
+        new_stacks.erase(std::unique(new_stacks.begin(), new_stacks.end()), new_stacks.end());
+        if (new_stacks.empty()) {
+            // TRACE-REMOVE-AFTER-PHASE1
+            // std::cerr << "accept: byte " << std::hex
+            //           << static_cast<int>(byte) << std::dec << " no stack consumed\n";
+            m_mask_valid = false;
+            return; // state unchanged.
+        }
+        m_stacks = std::move(new_stacks);
+    }
+
+    // Update m_partial_value / m_n_remain (token ending mid-UTF-8 sets carry).
+    uint8_t first = static_cast<uint8_t>(tok[0]);
+    if ((first & 0xE0) == 0xC0 || (first & 0xF0) == 0xE0 || (first & 0xF8) == 0xF0) {
+        int bytes = utf8_byte_count(first);
+        if (static_cast<int>(tok.size()) < bytes) {
+            m_partial_value = first;
+            m_n_remain = bytes - 1;
+        } else {
+            m_partial_value = 0;
+            m_n_remain = 0;
         }
     }
 
-    m_stacks = std::move(new_stacks);
     m_mask_valid = false;
 }
 
@@ -639,11 +775,6 @@ bool Grammar::accepting() const {
     if (m_terminal) return true;
     for (const auto& stack : m_stacks) {
         if (stack.empty()) return true;
-        const StackElem& top = stack.back();
-        const GrammarRule& rule = m_rules[top.rule_id];
-        if (top.pos >= rule.size()) return true;
-        if (rule[top.pos].type == ElemType::End || rule[top.pos].type == ElemType::Alt)
-            return true;
     }
     return false;
 }

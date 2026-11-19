@@ -308,71 +308,35 @@ ws ::= [ \t\n\r]*
     }
     g.set_vocab(tokens, {23});
 
-    int success_count = 0;
-    int total_rounds = 200;
-
-    for (int round = 0; round < total_rounds; ++round) {
-        // Reset grammar.
+    // Deterministic walks: every token of a valid JSON sample must be
+    // allowed by the mask, and EOG must be allowed exactly at the end.
+    struct Sample { const char* name; std::vector<int> ids; bool valid; };
+    const Sample samples[] = {
+        {"stray brace in key",  {0, 4, 4, 0},              false},   // after the key string, only ':' may follow
+        {"object cut short",    {0},                       false},   // EOG must NOT be allowed mid-object
+        {"terms number",        {0, 4, 7, 8, 9, 10, 11, 4, 6, 18, 1}, true},
+        {"nested array",        {0, 4, 16, 4, 6, 2, 18, 3, 1}, true},
+        {"multibyte content",   {0, 4, 20, 4, 6, 4, 21, 4, 1}, true},
+        {"nested object",       {0, 4, 12, 4, 6, 0, 4, 7, 8, 9, 10, 11, 4, 6, 2, 18, 3, 1, 1}, true},
+    };
+    int failures = 0;
+    for (const Sample& s : samples) {
         Grammar g2;
-        if (!Grammar::parse(gbnf, g2, err)) {
-            std::fprintf(stderr, "test 4: parse failed in round %d: %s\n", round, err.c_str());
-            std::exit(1);
-        }
+        if (!Grammar::parse(gbnf, g2, err)) { std::fprintf(stderr, "test 4: parse failed: %s\n", err.c_str()); std::exit(1); }
         g2.set_vocab(tokens, {23});
-
-        LCG rng(round * 31337 + 42);
-        std::string bytes;
-        int budget = 2000;
-        bool done = false;
-
-        while (!done && budget-- > 0) {
+        int failed_at = -1;
+        for (int id : s.ids) {
             auto mask = g2.allowed_mask();
-            // Collect allowed non-EOG tokens.
-            std::vector<int> allowed;
-            for (int i = 0; i < 24; ++i) {
-                if (mask[i / 64] & (1ULL << (i % 64))) {
-                    allowed.push_back(i);
-                }
-            }
-
-            if (allowed.empty()) break;
-
-            // Check if EOG is allowed.
-            bool eog_allowed = mask[23 / 64] & (1ULL << (23 % 64));
-            if (eog_allowed) {
-                // Pick EOG to finish.
-                g2.accept(23);
-                done = true;
-                break;
-            }
-
-            // Pick a random allowed token (not first).
-            int idx = static_cast<int>(rng.range(allowed.size()));
-            int tok = allowed[idx];
-            bytes += tokens[tok];
-            g2.accept(tok);
+            if (!(mask[id / 64] & (1ULL << (id % 64)))) { failed_at = id; break; }
+            g2.accept(id);
         }
-
-        if (!done) continue; // didn't reach EOG within budget.
-
-        // Verify: bytes should parse as a JSON object with "terms" array.
-        // Simple check: starts with '{', ends with '}', contains '"terms"'.
-        if (!bytes.empty() && bytes[0] == '{' && bytes.back() == '}' &&
-            bytes.find("\"terms\"") != std::string::npos) {
-            success_count++;
-        } else if (!bytes.empty() && bytes[0] == '{' && bytes.back() == '}') {
-            // Still valid JSON object, just without "terms" field.
-            // That's OK since the grammar allows any members.
-            success_count++;
-        }
+        auto mask = g2.allowed_mask();
+        bool eog_allowed_after = (mask[23 / 64] & (1ULL << (23 % 64))) ? 1 : 0;
+        bool outcome_ok = s.valid ? (failed_at == -1 && eog_allowed_after) : (failed_at != -1 || !eog_allowed_after);
+        if (!outcome_ok) { std::fprintf(stderr, "test 4: walk '%s' mismatch (failed_at_id=%d, eog=%d, valid=%d)\n", s.name, failed_at, eog_allowed_after, s.valid ? 1 : 0); ++failures; }
     }
-
-    std::fprintf(stdout, "test 4: %d/%d rounds produced valid JSON objects\n",
-                 success_count, total_rounds);
-    if (success_count < total_rounds / 2) {
-        std::fprintf(stderr, "test 4: too few successful rounds\n");
-        std::exit(1);
-    }
+    std::fprintf(stdout, "test 4: %d/%d deterministic walks correct\n", (int)(sizeof(samples)/sizeof(samples[0])) - failures, (int)(sizeof(samples)/sizeof(samples[0])));
+    if (failures > 0) { std::fprintf(stderr, "test 4: deterministic walks failed\n"); std::exit(1); }
 }
 
 // --- Test 5: Multibyte char class -----------------------------------------
