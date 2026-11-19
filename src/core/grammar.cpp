@@ -1,4 +1,4 @@
-// grammar.cpp — GBNF grammar-constrained decoding engine.
+﻿// grammar.cpp — GBNF grammar-constrained decoding engine.
 // Implements a PDA over GBNF rules; per step computes which token ids may
 // legally follow given a byte-level token vocabulary (llama.cpp-style).
 //
@@ -30,16 +30,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
 #include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-static const bool g_trace = std::getenv("STRATA_GRAMMAR_TRACE") != nullptr;
 
 namespace strata::core {
 
@@ -67,25 +62,7 @@ static int utf8_byte_count(uint32_t cp) {
     return 4;
 }
 
-static int utf8_encode(uint32_t cp, uint8_t* bytes) {
-    if (cp <= 0x7F) { bytes[0] = static_cast<uint8_t>(cp); return 1; }
-    if (cp <= 0x7FF) {
-        bytes[0] = 0xC0 | static_cast<uint8_t>(cp >> 6);
-        bytes[1] = 0x80 | static_cast<uint8_t>(cp & 0x3F);
-        return 2;
-    }
-    if (cp <= 0xFFFF) {
-        bytes[0] = 0xE0 | static_cast<uint8_t>(cp >> 12);
-        bytes[1] = 0x80 | static_cast<uint8_t>((cp >> 6) & 0x3F);
-        bytes[2] = 0x80 | static_cast<uint8_t>(cp & 0x3F);
-        return 3;
-    }
-    bytes[0] = 0xF0 | static_cast<uint8_t>(cp >> 18);
-    bytes[1] = 0x80 | static_cast<uint8_t>((cp >> 12) & 0x3F);
-    bytes[2] = 0x80 | static_cast<uint8_t>((cp >> 6) & 0x3F);
-    bytes[3] = 0x80 | static_cast<uint8_t>(cp & 0x3F);
-    return 4;
-}
+
 
 // ── Grammar parser helpers (free functions, called from member parse()) ──
 
@@ -227,7 +204,6 @@ static void parse_element(std::string_view src, size_t& i,
     if (i < src.size() && (src[i] == '*' || src[i] == '+' || src[i] == '?')) {
         char rep = src[i++];
         const size_t atoms_begin = start;
-        const size_t atoms_end = out->size();
         const uint32_t aux_id = static_cast<uint32_t>(rules->size());
         rules->emplace_back();
         std::vector<GrammarElement>& aux = rules->back();
@@ -312,16 +288,6 @@ bool Grammar::parse(const std::string& gbnf, Grammar& out, std::string& error) {
             if (pi == ns) { error = "expected rule name"; return false; }
             std::string nm(gbnf.data() + ns, pi - ns);
             skip_ws(gbnf, pi);
-            if (std::getenv("STRATA_GRAMMAR_TRACE")) std::fprintf(stderr, "[G] pass1 head nm='%s' pi=%zu size=%zu c1=%d c2=%d c3=%d c4=%d\n",
-                                      nm.c_str(), pi, gbnf.size(),
-                                      (int)(pi + 3 > gbnf.size()),
-                                      (int)(gbnf[pi] != ':'),
-                                      (int)(gbnf[pi+1] != '='),
-                                      (int)(gbnf[pi+2] != '='));
-            if (std::getenv("STRATA_GRAMMAR_TRACE")) std::fprintf(stderr, "[G] bytes at pi: %d %d %d\n",
-                                      (int)(unsigned char)gbnf[pi],
-                                      (int)(unsigned char)gbnf[pi+1],
-                                      (int)(unsigned char)gbnf[pi+2]);
             if (pi + 3 > gbnf.size() || gbnf[pi] != ':' || gbnf[pi+1] != ':' || gbnf[pi+2] != '=') { error = "expected ::= (pass 1 rule '" + nm + "' at " + std::to_string(pi) + " byte " + std::to_string((int)(unsigned char)gbnf[pi]) + ")"; return false; }
             pi += 3;
             while (pi < gbnf.size() && gbnf[pi] != '\n') pi++;   // skip the rule body: heads only
@@ -460,12 +426,10 @@ static void close_stack_set(const std::vector<GrammarRule>& rules,
     size_t steps = 0;
     while (!todo.empty()) {
         if (++steps > 100000) {
-            if (g_trace) std::fprintf(stderr, "[G] closure step cap hit\n");
             break;
         }
         Stack curr = std::move(todo.back());
         todo.pop_back();
-        if (g_trace) std::fprintf(stderr, "[G] clos todo=%zu depth_top=r%u p%zu\n", todo.size(), curr.empty() ? 0u : curr.back().rule_id, curr.empty() ? 0u : curr.back().pos);
 
         if (curr.empty()) { out.push_back(std::move(curr)); continue; }
 
@@ -493,7 +457,6 @@ static void close_stack_set(const std::vector<GrammarRule>& rules,
                 if (nxt.type != ElemType::End && nxt.type != ElemType::Alt)
                     parent.push_back({top.rule_id, top.pos + 1});
             }
-            if (g_trace) std::fprintf(stderr, "[G] expand RR->r%u forks:\n", elem.value);
             size_t alt_start = 0;
             for (size_t s = 0; s <= ref_rule.size(); ++s) {
                 bool boundary = (s == ref_rule.size()) || ref_rule[s].type == ElemType::Alt;
@@ -501,7 +464,6 @@ static void close_stack_set(const std::vector<GrammarRule>& rules,
                 Stack fork = parent;
                 if (alt_start < s) fork.push_back({elem.value, alt_start});
                 bool fresh = seen.insert(fork).second;
-                if (g_trace && fresh) std::fprintf(stderr, "[G]   fork r%u p%zu%s\n", elem.value, alt_start, (alt_start < s) ? "" : " (empty-alt)");
                 if (fresh) todo.push_back(std::move(fork));
                 alt_start = s + 1;
             }
@@ -561,7 +523,7 @@ static size_t class_advance_end(const GrammarRule& rule, size_t pos) {
 }
 
 static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
-                          bool negated, uint32_t rule_id) {
+                           bool negated) {
     bool any_matches = false;
     size_t i = pos;
     while (i < rule.size()) {
@@ -595,11 +557,6 @@ static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
         // Negated class: keep scanning — the match needs NO member to hit.
     }
     const bool matched = negated ? !any_matches : any_matches;
-    if (g_trace)
-        std::fprintf(stderr,
-                     "[G] class r%u p%zu byte=0x%02x matched=%d neg=%d\n",
-                     (unsigned)rule_id, pos, (unsigned)byte,
-                     matched ? 1 : 0, negated ? 1 : 0);
     return matched;
 }
 
@@ -610,7 +567,7 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
     // Phase A — CLOSURE: expand RuleRefs (llama.cpp advance_stack).
     std::vector<Stack> closed;
     close_stack_set(m_rules, {stack}, closed);
-    if (g_trace) std::fprintf(stderr, "[G] closed=%zu byte=0x%02x\n", closed.size(), (unsigned)byte);
+
 
     // Phase B — CONSUME: match byte against closed-stack tops.
     std::vector<Stack> advanced;
@@ -629,11 +586,11 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
 
         switch (elem.type) {
             case ElemType::Char:
-                matched = class_matches(rule, top.pos, byte, false, top.rule_id);
+                matched = class_matches(rule, top.pos, byte, false);
                 advance_pos = class_advance_end(rule, top.pos);
                 break;
             case ElemType::CharNot:
-                matched = class_matches(rule, top.pos, byte, true, top.rule_id);
+                matched = class_matches(rule, top.pos, byte, true);
                 advance_pos = class_advance_end(rule, top.pos);
                 break;
             case ElemType::CharRngUpper:
@@ -657,11 +614,8 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
         }
 
         if (!matched) {
-            if (g_trace) std::fprintf(stderr, "[G] die r%u p%zu byte=0x%02x\n", top.rule_id, top.pos, (unsigned)byte);
             continue; // stack dies on mismatch.
         }
-        if (g_trace) std::fprintf(stderr, "[G] match r%u p%zu byte=0x%02x\n", top.rule_id, top.pos, (unsigned)byte);
-
 
         Stack advanced_stack(stk.begin(), stk.end() - 1);
         // FIX 1: push next position ONLY when NOT End/Alt (else element is dropped).
@@ -677,17 +631,6 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
     // FIX 3: close the advanced stacks (RuleRef top gets expanded, empty = accepting).
     std::vector<Stack> reclosed;
     close_stack_set(m_rules, std::move(advanced), reclosed);
-
-    if (g_trace) {
-        std::fprintf(stderr, "[G] adv-out=%zu reclosed=%zu:", advanced.size(), reclosed.size());
-        for (const auto& o : reclosed) {
-            std::fprintf(stderr, " [");
-            for (size_t k = 0; k < o.size(); ++k)
-                std::fprintf(stderr, "%s%u:%zu", k ? "," : "", o[k].rule_id, o[k].pos);
-            std::fprintf(stderr, "]");
-        }
-        std::fprintf(stderr, "\n");
-    }
 
     for (auto& stk : reclosed) {
         out.push_back(std::move(stk));
@@ -818,16 +761,7 @@ void Grammar::accept(int token_id) {
     for (const auto& st : m_stacks)
         if (!st.empty()) walk_from.push_back(st);
     std::vector<Stack> new_stacks;
-    if (g_trace) {
-        std::fprintf(stderr, "[G] accept start tok=%zu walk_from=%zu:", tok.size(), walk_from.size());
-        for (const auto& o : walk_from) {
-            std::fprintf(stderr, " [");
-            for (size_t k = 0; k < o.size(); ++k)
-                std::fprintf(stderr, "%s%u:%zu", k ? "," : "", o[k].rule_id, o[k].pos);
-            std::fprintf(stderr, "]");
-        }
-        std::fprintf(stderr, "\n");
-    }
+
     for (size_t byte_idx = 0; byte_idx < tok.size(); byte_idx++) {
         uint8_t byte = static_cast<uint8_t>(tok[byte_idx]);
         new_stacks.clear();
@@ -836,20 +770,8 @@ void Grammar::accept(int token_id) {
         }
         std::sort(new_stacks.begin(), new_stacks.end());
         new_stacks.erase(std::unique(new_stacks.begin(), new_stacks.end()), new_stacks.end());
-        if (g_trace) {
-            std::fprintf(stderr, "[G] accept byte=0x%02x walk_from=%zu survivors=%zu:", (unsigned)byte, walk_from.size(), new_stacks.size());
-            for (const auto& o : new_stacks) {
-                std::fprintf(stderr, " [");
-                for (size_t k = 0; k < o.size(); ++k)
-                    std::fprintf(stderr, "%s%u:%zu", k ? "," : "", o[k].rule_id, o[k].pos);
-                std::fprintf(stderr, "]");
-            }
-            std::fprintf(stderr, "\n");
-        }
+
         if (new_stacks.empty()) {
-            // TRACE-REMOVE-AFTER-PHASE1
-            // std::cerr << "accept: byte " << std::hex
-            //           << static_cast<int>(byte) << std::dec << " no stack consumed\n";
             m_mask_valid = false;
             return; // state unchanged.
         }
