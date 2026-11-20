@@ -445,6 +445,29 @@ public:
         return n;
     }
 
+    /// Drops every parked bank except the current conversation's — the UI clear button's
+    /// DROP line.  The pinned conversation (system prompt) is out of scope: it is not in the
+    /// slots at all.  Returns how many were dropped.
+    size_t drop_all() {
+        size_t n = 0;
+        int64_t tokens = 0;
+        for (size_t i = 0; i < slots_.size(); ++i) {
+            Slot& s = slots_[i];
+            if (i == cur_ || s.seq.empty()) continue;
+            tokens += len(s);
+            s = Slot{};
+            ++n;
+        }
+        if (n && o_.log) {
+            const Held h = held(cur_);
+            std::fprintf(o_.log,
+                         "strata-poly: conversation cache: dropped %zu parked banks for the clear (%lld tokens); parked=%zu bytes=%zu evictions=%zu heap=%lld MiB\n",
+                         n, (long long) tokens, h.count, h.bytes, evictions_,
+                         (long long) (spill_heap_bytes() >> 20));
+        }
+        return n;
+    }
+
     /// Drops parked banks until free host RAM >= ram_target_mib MiB (fork feature,
     /// defined in conversations_ram.hpp).
     size_t drop_for_ram();

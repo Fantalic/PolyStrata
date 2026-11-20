@@ -22,7 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
-from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
+from serve.server import (CTX_SLACK, ByteTokenizer, ConvCacheLog, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
                           PP_DONE_TAIL, Service, SessionRefused, model_settings,
                           StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
                           prompt_tokens_seen,
@@ -6444,5 +6444,92 @@ class MockEnginePark(unittest.TestCase):
         self.assertIn("parked", out)
         self.assertIn("bytes", out)
         self.assertIn("ms", out)
+
+
+class ConversationCacheDrop(unittest.TestCase):
+    """POST /v1/cache/drop: every parked conversation bank except the current one's leaves the process."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
+                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.httpd = serve(cls.svc, port=0)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def request(self, path, body=None):
+        req = urllib.request.Request(self.base + path, data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read()
+
+    def test_drop_endpoint_loaded(self):
+        """POST /v1/cache/drop when loaded -> 200 with engine figures."""
+        status, raw = self.request("/v1/cache/drop", {})
+        self.assertEqual(status, 200)
+        data = json.loads(raw)
+        self.assertEqual(data["status"], "dropped")
+        self.assertIn("dropped", data)
+        self.assertIn("bytes", data)
+        self.assertIn("ms", data)
+
+    def test_drop_endpoint_not_loaded(self):
+        """POST /v1/cache/drop when not loaded -> 200 {"status": "not loaded"}."""
+        self.svc.engine.alive = lambda: False   # the engine reports not running: nothing to drop
+        try:
+            status, raw = self.request("/v1/cache/drop", {})
+        finally:
+            del self.svc.engine.alive
+        self.assertEqual(status, 200)
+        data = json.loads(raw)
+        self.assertEqual(data["status"], "not loaded")
+        self.assertIn("note", data)
+
+
+class MockEngineDrop(unittest.TestCase):
+    """MockEngine.drop() returns a dict with the expected keys."""
+
+    def test_drop_returns_expected_keys(self):
+        eng = MockEngine(ByteTokenizer(), "ok", max_context=CTX)
+        out = eng.drop()
+        self.assertIn("ok", out)
+        self.assertIn("dropped", out)
+        self.assertIn("bytes", out)
+        self.assertIn("ms", out)
+        self.assertEqual(out["dropped"], 2)
+
+
+class ConvCacheLogParse(unittest.TestCase):
+    """The monitor's conversation-cache figures come from the engine's log lines (ConvCacheLog);
+    both drop lines shrink the shelf in the snapshot."""
+
+    LINES = (
+        "strata-poly: conversation cache: parked 61000 tokens (61 s); parked=2 bytes=3536873472 evictions=0 heap=3300 MiB\n"
+        "strata-poly: conversation cache: dropped 3 parked banks for the clear (182940 tokens); parked=1 bytes=395231232 evictions=0 heap=376 MiB\n"
+    )
+
+    def poll_lines(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "engine.log"
+            p.write_text(text)
+            return ConvCacheLog().poll(str(p), 0)
+
+    def test_the_clear_drop_updates_parked_and_bytes(self):
+        st = self.poll_lines(self.LINES)
+        self.assertEqual(st["parked"], 1)
+        self.assertEqual(st["bytes"], 395231232)
+
+    def test_a_superseded_drop_updates_parked_and_bytes_too(self):
+        text = ("strata-poly: conversation cache: parked 50000 tokens (50 s); parked=2 bytes=2000000000 evictions=1 heap=2100 MiB\n"
+                "strata-poly: conversation cache: dropped 1 superseded conversations (50250 tokens idle over 900 s); "
+                "parked=4 bytes=4588840960 evictions=45 heap=4376 MiB\n")
+        st = self.poll_lines(text)
+        self.assertEqual(st["parked"], 4)
+        self.assertEqual(st["bytes"], 4588840960)
 
 

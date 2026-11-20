@@ -335,6 +335,10 @@ class MockEngine:
         """MockEngine: the park reply the StrataEngine would write to its stdout."""
         return {"ok": 1, "parked": 1, "bytes": 81234, "ms": 12.3}
 
+    def drop(self, timeout: float = 120.0) -> dict:
+        """MockEngine: the drop reply the StrataEngine would write to its stdout."""
+        return {"ok": 1, "dropped": 2, "bytes": 162468, "ms": 3.4}
+
 
 class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
@@ -698,7 +702,9 @@ class ConvCacheLog:
     which is the log): read on from where it was last read, from the start of the engine's current run."""
     EVENT = re.compile(r"conversation cache: (parked|skipped|restored) (\d+) tokens.*?parked=(\d+) bytes=(\d+)"
                        r"(?: evictions=(\d+))?")
-    DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+)")
+    DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+) bytes=(\d+)")
+    CLEAR = re.compile(r"conversation cache: dropped \d+ parked banks for the clear \(\d+ tokens\); "
+                       r"parked=(\d+) bytes=(\d+)")
     READ_MAX = 1 << 20                                  # at most the last MiB of new lines per read
 
     def __init__(self):
@@ -744,8 +750,12 @@ class ConvCacheLog:
                     st["last_event"], st["last_tokens"], st["last_at"] = m.group(1), int(m.group(2)), now
                 continue
             m = self.DROPPED.search(line)
-            if m:
-                self.state["parked"] = int(m.group(1))
+            if m:                                           # a superseded bank's drop: the shelf shrinks
+                self.state["parked"], self.state["bytes"] = int(m.group(1)), int(m.group(2))
+                continue
+            m = self.CLEAR.search(line)
+            if m:                                           # the Clear-parked button's drop: same, counts stay
+                self.state["parked"], self.state["bytes"] = int(m.group(1)), int(m.group(2))
         return dict(self.state)
 
 
@@ -1248,6 +1258,33 @@ class StrataEngine:
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the PARK command")
 
+    def drop(self, timeout: float = 120.0) -> dict:
+        """`DROP` between requests (the caller holds the service's FIFO): every parked bank except the
+        current conversation's leaves the process.  -> the engine's figures (dropped, bytes, ms); raises
+        ValueError with the engine's reason, EngineDied when it ended."""
+        if not self.alive():
+            raise EngineDied("the engine is not running")
+        self.proc.stdin.write("DROP\n")
+        self.proc.stdin.flush()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                line = self.lines.get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                raise EngineDied("the engine did not answer the DROP command") from None
+            if line is None:
+                raise EngineDied("the engine ended")
+            line = line.strip()
+            if line.startswith("ERR"):
+                raise ValueError(line[4:].strip() or "the engine refused the DROP command")
+            if line.startswith("DROP "):
+                out = {}
+                for kv in line.split()[1:]:
+                    k, _, v = kv.partition("=")
+                    out[k] = int(v) if v.lstrip("-").isdigit() else v
+                return out
+            if time.time() > deadline:
+                raise EngineDied("the engine did not answer the DROP command")
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -4191,6 +4228,7 @@ class Service:
 
     vram_wait_s = 300.0                                  # #533: how long POST /v1/vram waits for a running request
     park_wait_s = 300.0                         # how long POST /v1/cache/park waits for a running request
+    drop_wait_s = 300.0                         # how long POST /v1/cache/drop waits for a running request
 
     def vram(self, reserve_mib: int | None) -> dict:
         """#533, POST /v1/vram: keep `reserve_mib` of VRAM free for other programs (None: the reserve the engine
@@ -4240,6 +4278,28 @@ class Service:
                 return {"status": "not loaded", "note": "nothing to park"}
             out = self.engine.park()
             return {"status": "parked", **out}
+        finally:
+            if ctl is not None:
+                ctl.release()
+            self.fifo.release()
+
+    def drop(self) -> dict:
+        """POST /v1/cache/drop: every parked conversation bank except the current one's leaves the
+        process, between requests - a request that is running finishes first (up to drop_wait_s).
+        -> {"status": ... and the engine's figures}."""
+        if not hasattr(self.engine, "drop"):
+            raise ValueError("this engine cannot drop its parked conversation banks")
+        if not self.fifo.acquire(timeout=self.drop_wait_s):
+            raise ModelBusy("a request is still running; try again when it has finished")
+        ctl = getattr(self.engine, "ctl", None) if getattr(self.engine, "batch", 0) else None
+        if ctl is not None and not ctl.acquire(timeout=self.drop_wait_s):
+            self.fifo.release()
+            raise ModelBusy("a request is still running; try again when it has finished")
+        try:
+            if not self.loaded():
+                return {"status": "not loaded", "note": "nothing to clear"}
+            out = self.engine.drop()
+            return {"status": "dropped", **out}
         finally:
             if ctl is not None:
                 ctl.release()
@@ -6610,6 +6670,14 @@ def make_handler(svc: Service):
                         return
                     try:
                         self._json(200, svc.park())
+                    except EngineDied as e:
+                        self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                    return
+                if path == "/v1/cache/drop":                 # the parked conversation banks, cleared
+                    if not self._own_page("the conversation cache can be cleared"):
+                        return
+                    try:
+                        self._json(200, svc.drop())
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return

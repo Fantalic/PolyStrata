@@ -270,6 +270,7 @@ function render(m) {
 
 // #596: the conversation cache - the prompt's state the engine keeps between requests (always), and the whole
 // conversations it parks in RAM when "--conversation-cache-mib N" is in the run config's args (opt-in)
+let ccBusy = false;
 function since(t) {
   if (!t) return "";
   const s = Math.max(0, Date.now() / 1000 - t);
@@ -299,6 +300,22 @@ function renderConvCache(c) {
   $("cc-note").textContent = c.enabled
     ? "A request that continues a parked conversation gets its state back instead of reading it again; the oldest goes when the slots or the memory are full."
     : "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), add \"--conversation-cache-mib\", \"8192\" to the run config's args (docs/DETAILS.md).";
+  const clear = $("cc-clear");
+  if (clear) {
+    clear.disabled = ccBusy || !c.enabled || !c.parked;
+    clear.onclick = async () => {
+      clear.disabled = true;
+      try {
+        const r = await fetch("/v1/cache/drop", {method: "POST", headers: headers(true), body: "{}"});
+        const d = await r.json();
+        if (r.ok && d.status === "dropped") {
+          $("cc-clear-note").textContent = `Cleared ${fmt(d.dropped)} bank${d.dropped === 1 ? "" : "s"} (${gb(d.bytes)})`;
+        } else {
+          $("cc-clear-note").textContent = d.status === "not loaded" ? d.note : (d.error?.message || "could not clear");
+        }
+      } catch { $("cc-clear-note").textContent = "could not clear"; }
+    };
+  }
 }
 
 function renderTotals(t) {
@@ -313,6 +330,7 @@ function renderTotals(t) {
 function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   // model state
   const on = live.queued > 0 ? "queued" : live.state;
+  ccBusy = on === "queued" || live.state === "reading" || live.state === "generating" || live.state === "error";
   for (const b of document.querySelectorAll("#state-badges .st-badge")) b.classList.toggle("on", b.dataset.s === on || b.dataset.s === live.state);
   const prog = $("state-progress");
   let label = "Waiting for a request", detail = "", pct = 0;

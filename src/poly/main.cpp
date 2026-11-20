@@ -1195,6 +1195,22 @@ int serve(Session& ss) {
             std::fflush(stdout);
             continue;
         }
+        // DROP, the server's POST /v1/cache/drop: every parked bank except the current
+        // conversation's, gone — with the numbers as the reply
+        if (line.rfind("DROP", 0) == 0 && line.size() == 4) {
+            if (writing()) {
+                std::printf("ERR DROP: not while batch slots are writing\n");
+                std::fflush(stdout);
+                continue;
+            }
+            const Clock::time_point t0 = Clock::now();
+            const size_t before = ss.kept.parked_bytes();
+            const size_t n = ss.kept.drop_all();
+            std::printf("DROP ok=1 dropped=%zu bytes=%zu ms=%.1f\n", n, before - ss.kept.parked_bytes(),
+                        ms_since(t0));
+            std::fflush(stdout);
+            continue;
+        }
         // A refusal is in the session protocol's own words: a bare ERR is a reply out of step there, and the server
         // ended this engine for it (issue 114).
         if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {

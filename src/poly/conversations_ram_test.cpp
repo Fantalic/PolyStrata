@@ -292,6 +292,100 @@ void drop_for_ram_wanted_skips() {
     check(c.ask(d) > 0, "d (current) survived");
 }
 
+// drop_all(): no parked banks — returns 0, parked stays 0, no log line.
+void drop_all_no_parked() {
+    CacheOptions o = options(64, 4);
+    Chat c(o);
+
+    std::vector<int32_t> a = text(1, 3000);
+    c.ask(a);
+    check(c.kept.parked() == 0, "no parked conversations after first ask");
+
+    check(c.kept.drop_all() == 0, "drop_all returns 0 with nothing parked");
+    check(c.kept.parked() == 0, "parked stays 0");
+}
+
+// drop_all(): three parked conversations — returns 3, parked == 0, current slot survives.
+void drop_all_three_parked() {
+    CacheOptions o = options(64, 3);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park three conversations: A (slot 0), B (slot 1), C (slot 2), D current (slot 3)
+    std::vector<int32_t> a = text(1, 3000), b = text(2, 3000), c2 = text(3, 3000), d = text(4, 3000);
+    c.ask(a); c.ask(b); c.ask(c2); c.ask(d);
+    check(c.kept.parked() == 3, "three conversations parked, all slots full");
+
+    check(c.kept.drop_all() == 3, "drop_all returns 3");
+    check(c.kept.parked() == 0, "parked == 0 after drop_all");
+    check(c.kept.parked_bytes() == 0, "parked_bytes == 0 after drop_all");
+
+    // Current conversation's slot survives: a follow-up that continues it reuses its cache.
+    std::vector<int32_t> cont = text(4, 3200);
+    check(c.ask(cont) > 0, "the current conversation's cache survived drop_all (follow-up reuses)");
+    check(c.kept.parked() == 0, "the continued conversation was not parked");
+}
+
+// drop_all(): log line appears when logging is enabled.
+void drop_all_log_line() {
+    FILE* logf = nullptr;
+    fopen_s(&logf, "drop_all_test.log", "w");
+    check(logf != nullptr, "log file opened");
+    if (!logf) return;
+
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    o.log = logf;
+    Chat c(o);
+
+    std::vector<int32_t> a = text(1, 3000), b = text(2, 3000), c2 = text(3, 3000);
+    c.ask(a); c.ask(b); c.ask(c2);
+    check(c.kept.parked() == 2, "two conversations parked before drop_all");
+
+    c.kept.drop_all();
+
+    fclose(logf);
+    logf = nullptr;
+
+    FILE* rf = nullptr;
+    fopen_s(&rf, "drop_all_test.log", "r");
+    check(rf != nullptr, "log file readable for assertion");
+    if (rf) {
+        char buf[1024] = "";
+        while (std::fgets(buf, (int)sizeof(buf), rf)) {}   // the last line is drop_all's
+        fclose(rf);
+        check(std::strstr(buf, "dropped 2 parked banks") != nullptr,
+              "log contains 'dropped 2 parked banks'");
+        check(std::strstr(buf, "for the clear") != nullptr,
+              "log contains 'for the clear'");
+        std::remove("drop_all_test.log");
+    }
+}
+
+// drop_all(): only the current conversation is spared.
+void drop_all_cur_spared() {
+    CacheOptions o = options(64, 2);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park two conversations: a2 (slot 0), b2 (slot 1), c2 current (slot 2)
+    std::vector<int32_t> a2 = text(10, 2000), b2 = text(20, 2000), c2 = text(30, 2000);
+    c.ask(a2); c.ask(b2); c.ask(c2);
+    check(c.kept.parked() == 2, "two parked, one current");
+
+    check(c.kept.drop_all() == 2, "drop_all returns 2 parked");
+    check(c.kept.parked() == 0, "parked == 0 after drop_all");
+
+    // b2 was parked in slot 1: drop_all spared cur_ (slot 2), b2 was cleared.
+    // Resuming b2 should re-read from 0 since it was dropped.
+    check(c.ask(b2) == 0, "b2 was dropped: re-read from 0");
+    // c2 was current and is spared by drop_all: the switch parked it (normal shelf behavior),
+    // and its follow-up reuses the parked cache.
+    check(c.kept.parked() == 1, "the switch parked the spared current conversation (normal behavior)");
+    std::vector<int32_t> cont2 = text(30, 2200);
+    check(c.ask(cont2) > 0, "c2 (current) survived drop_all - its follow-up reuses");
+}
+
 }  // namespace
 
 int main() {
@@ -301,6 +395,10 @@ int main() {
     drop_for_ram_unknown_host();
     adopt_sets_used_for_ttl();
     drop_for_ram_wanted_skips();
+    drop_all_no_parked();
+    drop_all_three_parked();
+    drop_all_log_line();
+    drop_all_cur_spared();
     std::printf("conversations_ram_test: %d checks passed\n", checks);
     return 0;
 }
