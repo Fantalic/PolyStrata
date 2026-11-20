@@ -317,6 +317,29 @@ if(STRATA_ENABLE_CUDA)
     endif()
     add_subdirectory(${strata_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   endif()
+  # Clang turns ggml-cpu's i-quant grid lookups (_mm256_set_epi32 of eight table loads, IQ2_*/IQ3_*) into
+  # vpgatherdd, which Intel's Gather Data Sampling microcode mitigation (2023) made slow on Skylake to Tiger Lake.
+  # -mno-gather keeps them scalar loads: the same values, so the same products.  On an i9-9980HK (Windows, ROCm's
+  # clang, one thread) a 2048-value IQ2_S row went from 500 to 183 ns and an IQ3_XXS row from 978 to 269 ns;
+  # IQ4_XS, Q3_K and Q8_0 rows did not move.  On by default only where a GNU-style clang compiles ggml-cpu for
+  # x86-64 on an Intel CPU (the Windows HIP build on one: the engine is compiled on the PC it runs on); it was not
+  # measured on an AMD CPU or on an Intel one newer than Tiger Lake.  -DSTRATA_CPU_NO_GATHER=ON / OFF sets it.
+  set(_strata_no_gather_default OFF)
+  if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" AND
+     CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|amd64)$" AND NOT STRATA_ISA_FLOOR)
+    cmake_host_system_information(RESULT _strata_host_cpu QUERY PROCESSOR_DESCRIPTION)
+    include(CheckCCompilerFlag)
+    check_c_compiler_flag(-mno-gather STRATA_HAVE_MNO_GATHER)
+    if(STRATA_HAVE_MNO_GATHER AND _strata_host_cpu MATCHES "GenuineIntel")
+      set(_strata_no_gather_default ON)
+    endif()
+  endif()
+  option(STRATA_CPU_NO_GATHER "Compile ggml-cpu with -mno-gather (scalar table loads in place of gathers)"
+         ${_strata_no_gather_default})
+  if(STRATA_CPU_NO_GATHER AND TARGET ggml-cpu)
+    message(STATUS "ggml-cpu: -mno-gather (STRATA_CPU_NO_GATHER)")
+    target_compile_options(ggml-cpu PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:-mno-gather>)
+  endif()
 endif()
 endif()
 
