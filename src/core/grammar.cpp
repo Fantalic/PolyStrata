@@ -907,7 +907,6 @@ void Grammar::accept(int token_id) {
     for (int eid : m_eog_ids)
         if (eid == token_id) { m_terminal = true; m_mask_valid = false; return; }
 
-    // Advance all stacks byte-by-byte, committing the final stack set.
     const std::string& tok = m_tokens[token_id];
     if (tok.empty()) return;
 
