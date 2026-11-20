@@ -514,9 +514,20 @@ struct Session {
             if (gs.active()) {
                 const int nv = engine.n_vocab();
                 masked.assign(logits, logits + nv);
+                const auto mask_t0 = Clock::now();
                 gs.mask(masked.data(), nv);
-                const int32_t t = (int32_t) sampler.pick(masked.data(), nv, s, history, rng);
-                if (!gs.accept(t)) grammar_failed = true;
+                const long long mask_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - mask_t0).count();
+                std::fprintf(stderr, "[masktime] pick %lld ms\n", mask_ms);
+                // The mask is a superset for whole multi-byte tokens: their
+                // later bytes are checked only by the strict accept, so a
+                // rejected pick is banned and re-sampled (llama.cpp's retry).
+                int32_t t = 0;
+                for (int tries = 0; tries < 64; ++tries) {
+                    t = (int32_t) sampler.pick(masked.data(), nv, s, history, rng);
+                    if (gs.accept(t)) return t;
+                    masked[(size_t) t] = -1e30f;   // ban and re-pick
+                }
+                grammar_failed = true;
                 return t;
             }
             return (int32_t) sampler.pick(logits, engine.n_vocab(), s, history, rng);
