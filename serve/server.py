@@ -985,7 +985,11 @@ class StrataEngine:
         # it runs (INFO batch_slots=N: it may have fewer than asked, or none, when they do not fit)
         asked = next((int(args[args.index(k) + 1]) for k in ("--batch", "--slots") if k in args), 0)
         self.batch = int(self.info.get("batch_slots") or 0)
-        self.grammar = int(self.info.get("grammar") or 0)
+        # The engine's INFO line advertises grammar-constrained decoding (1) or not (absent/0).
+        # Anything else the engine prints there is treated as "not available" rather than
+        # crashing the server at startup.
+        _g = self.info.get("grammar")
+        self.grammar = 1 if _g == 1 or _g == "1" else 0
         if asked and self.batch != asked:
             print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
                   "(its log says why)", flush=True)

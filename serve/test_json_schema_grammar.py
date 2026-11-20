@@ -320,6 +320,16 @@ def test_no_dangling_refs():
             assert ref in rules, f"Rule '{name}' references undefined '{ref}'. Grammar:\\n{g}"
 
 
+def test_json_object_requires_a_member():
+    """json_object's root requires at least one member: {} cannot derive."""
+    g = json_object_grammar()
+    rules = _parse_rules(g)
+    body = rules["root"]
+    assert not body.startswith("object"), g          # not the bare object primitive
+    assert 'string ":" ws value' in body, g          # a required first member
+    assert ")?" not in body, g                       # the member group is not optional
+
+
 def test_value_references_defined():
     """The `value` primitive (when present) references only defined rules."""
     g = json_object_grammar()

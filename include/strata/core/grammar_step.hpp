@@ -113,8 +113,7 @@ inline void GrammarStep::mask(float* logits, int n_vocab) {
 inline bool GrammarStep::accept(int32_t id) {
     if (!active_) return true;
     if (!g_.is_allowed(id)) return false;
-    g_.accept(id);
-    return true;
+    return g_.accept(id);   // false: the token's text overran the grammar — ban it
 }
 
 inline bool GrammarStep::active() const { return active_; }

@@ -2374,7 +2374,7 @@ Unloading and shutdown close the native engine's stdin after sending `QUIT`, all
 stdin reader to see EOF. Cleanup waits for process exit before releasing handles; if forced shutdown still
 times out, the server keeps ownership and reports an error rather than claiming the model was unloaded.
 
-### JSON response formats
+### JSON response formats (structured output)
 
 `POST /v1/chat/completions` accepts `response_format: {"type":"json_object"}` or
 `{"type":"json_schema","json_schema":{"name":"answer","strict":true,"schema":{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false}}}`.
@@ -2386,15 +2386,22 @@ llama.cpp's `json_schema` send. A root that also allows an array, string, number
 "jsonschema>=4.23,<5"`; setup does not add it); without it the answer is only checked to be one JSON object, and the
 server says so once.
 
-This is **schema prompting followed by server validation**, not grammar-constrained decoding. One generation
-is made per request, with no hidden retry. Successful responses contain a validated JSON object. Malformed JSON,
-duplicate keys, non-finite numbers, schema violations and incomplete generations return **502** with
+When the engine supports grammar-constrained decoding, the schema is compiled to GBNF and the engine's token picks
+are restricted at every step — this is **grammar_and_validate**, not prompt engineering. One generation is made per
+request, with no hidden retry. Successful responses contain a validated JSON object. Malformed JSON, duplicate keys,
+non-finite numbers, schema violations and incomplete generations return **502** with
 `error.code: structured_output_failed`; invalid request schemas return **400**. JSON formats combined with
 tools/MCP are refused explicitly. Without `response_format`, ordinary text and tool behavior stays the same.
 
+The server also auto-disables reasoning/thinking (`reasoning_effort: false`) when a structured request is detected —
+grammar masks cannot coexist with thinking wrappers.
+
 Structured SSE buffers the answer while sending keep-alive comments. It emits content only after validation,
 then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without invalid content deltas.
-`/v1/status.structured_output` advertises the formats, validation method and buffered streaming behavior.
+`/v1/status` exposes `structured_output` with `formats`, `method` (`grammar_and_validate` or `prompt_and_validate`),
+`constrained_decoding` (boolean), and `stream_buffered`.
+
+The full doc with worked examples, the grammar compiler's limits and troubleshooting: [STRUCTURED_OUTPUT.md](STRUCTURED_OUTPUT.md).
 
 ### API request monitor
 

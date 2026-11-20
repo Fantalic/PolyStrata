@@ -314,6 +314,10 @@ All twelve models are used the same way: the same app, the same API.
     ([setup](docs/DETAILS.md#the-responses-api-and-codex-cli)).
 - **Thinking:** choose **off, low, medium or high** in the chat menu or in your app's "reasoning effort". Off is the
   fastest. High is best for hard questions.
+- **JSON answers:** apps can force a JSON reply with `response_format: {"type": "json_object"}` or a full
+  schema (`{"type": "json_schema", ...}`) on `/v1/chat/completions`. The server validates every answer and
+  answers a bad one with 502 `structured_output_failed`
+  ([how it works, limits, examples](docs/STRUCTURED_OUTPUT.md)).
 - **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Always set a key.
 
 Where they differ:

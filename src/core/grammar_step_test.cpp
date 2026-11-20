@@ -251,12 +251,89 @@ ws ::= [ \t]*)";
     std::fprintf(stdout, "test_accept_masked_id: pass\n");
 }
 
+// The exact json_object_grammar() output (serve/json_schema_to_grammar.py):
+// one JSON object with at least one member — {} must not be derivable.
+// Vocab: 0="{" 1="}" 2="\"" 3="a" 4=":" 5="1" 6="," 7="<eog>"
+static void test_json_object_member_required() {
+    strata::core::GrammarStep gs;
+    std::string err;
+    std::vector<std::string> vocab = { "{", "}", "\"", "a", ":", "1", ",", "<eog>" };
+    std::vector<int32_t> eog = { 7 };
+
+    const char* gbnf = R"GBNF(root ::= "{" ws string ":" ws value ("," ws string ":" ws value)* ws "}"
+array ::= "[" ws ( value ("," ws value)* )? ws "]"
+boolean ::= "true" | "false"
+char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+dec_part ::= [0-9] [0-9]*
+int_part ::= "0" | [1-9] [0-9]*
+integer ::= "-"? int_part
+null ::= "null"
+number ::= "-"? int_part ("." dec_part)? ([eE] [-+]? dec_part)?
+object ::= "{" ws ( string ":" ws value ("," ws string ":" ws value)* )? ws "}"
+string ::= "\"" char* "\""
+value ::= object | array | string | number | boolean | null
+ws ::= [ \t\n\r]*)GBNF";
+    std::string hex = hex_encode(gbnf);
+    if (!gs.set(hex, vocab, eog, err)) {
+        std::fprintf(stderr, "test_json_object 1: set failed: %s\n", err.c_str());
+        std::exit(1);
+    }
+
+    // At the start only "{" (id 0) is legal; "}" and "," must be masked.
+    std::vector<float> logits(8);
+    for (int i = 0; i < 8; i++) logits[i] = (float)i;
+    gs.mask(logits.data(), 8);
+    if (logits[0] != 0.f || logits[1] != -1e30f || logits[6] != -1e30f) {
+        std::fprintf(stderr, "test_json_object 2: start mask wrong ({=%f }=%f ,=%f)\n",
+                     logits[0], logits[1], logits[6]);
+        std::exit(1);
+    }
+
+    // Accept "{" — "}" must STILL be masked (a member is required) while the
+    // string quote must be allowed. This is the regression proof for the
+    // measured temp-0 "{}" degeneration.
+    if (!gs.accept(0)) {
+        std::fprintf(stderr, "test_json_object 3: '{' rejected\n");
+        std::exit(1);
+    }
+    for (int i = 0; i < 8; i++) logits[i] = (float)i;
+    gs.mask(logits.data(), 8);
+    if (logits[1] != -1e30f) {
+        std::fprintf(stderr, "test_json_object 4: '}' allowed after '{' — {} is derivable\n");
+        std::exit(1);
+    }
+    if (logits[2] == -1e30f) {
+        std::fprintf(stderr, "test_json_object 5: '\"' masked after '{' — nothing can follow\n");
+        std::exit(1);
+    }
+
+    // A full member walk: {"a":1}
+    const int32_t walk[] = { 2, 3, 2, 4, 5, 1 };
+    for (int step = 0; step < 6; step++) {
+        if (!gs.accept(walk[step])) {
+            std::fprintf(stderr, "test_json_object 6: step %d rejected token %d\n", step, walk[step]);
+            std::exit(1);
+        }
+    }
+
+    // Root is complete: EOG must now be allowed (the model may stop).
+    for (int i = 0; i < 8; i++) logits[i] = (float)i;
+    gs.mask(logits.data(), 8);
+    if (logits[7] == -1e30f) {
+        std::fprintf(stderr, "test_json_object 7: EOG masked after a complete object\n");
+        std::exit(1);
+    }
+
+    std::fprintf(stdout, "test_json_object_member_required: pass\n");
+}
+
 int main() {
     test_set();
     test_mask();
     test_greedy_walk();
     test_eog_masking();
     test_accept_masked_id();
+    test_json_object_member_required();
     std::fprintf(stdout, "All tests pass\n");
     return 0;
 }

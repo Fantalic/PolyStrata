@@ -109,11 +109,14 @@ public:
     // so the caller knows to treat it as a bug.
     const std::vector<unsigned long long>& allowed_mask();
 
-    // Advance the state by one accepted token.  The caller must only pass a
-    // token whose bit was set in `allowed_mask()`.  If the token has no set
-    // bit the state is left unchanged (no-op).  After accepting an EOG token
-    // the grammar becomes terminal.
-    void accept(int token_id);
+    // Advance the state by one accepted token.  Returns false and leaves the
+    // state (and the mask cache) UNCHANGED when the token's text cannot be
+    // consumed in full by the grammar from the current state — the caller
+    // (GrammarStep::accept) treats that as a rejected pick and bans it.  The
+    // mask is a superset: a token may have a set bit yet still fail here, so
+    // always branch on the return value.  After accepting an EOG token the
+    // grammar becomes terminal.
+    bool accept(int token_id);
 
     // True when the grammar can end at the current state (some rule stack is
     // complete); EOG tokens are then part of `allowed_mask()`.
