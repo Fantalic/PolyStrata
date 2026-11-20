@@ -30,7 +30,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <array>
+#include <map>
 #include <set>
+#include <utility>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -156,7 +159,7 @@ static uint32_t parse_char_val(std::string_view src, size_t& i, std::string& err
 }
 
 static void parse_quoted(std::string_view src, size_t& i,
-                         std::vector<GrammarElement>* out, std::string& err) {
+                          std::vector<GrammarElement>* out, std::string& err) {
     char q = src[i++];
     while (i < src.size() && src[i] != q) {
         uint32_t cp = parse_char_val(src, i, err);
@@ -176,7 +179,7 @@ static void parse_quoted(std::string_view src, size_t& i,
 }
 
 static void parse_char_class(std::string_view src, size_t& i,
-                             std::vector<GrammarElement>* out, std::string& err) {
+                              std::vector<GrammarElement>* out, std::string& err) {
     i++; // skip [
     bool neg = false;
     if (i < src.size() && src[i] == '^') { neg = true; i++; }
@@ -215,16 +218,16 @@ static void parse_char_class(std::string_view src, size_t& i,
 }
 
 static void parse_group(std::string_view src, size_t& i,
-                        std::vector<GrammarElement>* out,
-                        std::unordered_map<std::string, size_t>* name_to_id,
-                        std::vector<GrammarRule>* rules,
-                        std::string& err);
+                         std::vector<GrammarElement>* out,
+                         std::unordered_map<std::string, size_t>* name_to_id,
+                         std::vector<GrammarRule>* rules,
+                         std::string& err);
 
 static void parse_element(std::string_view src, size_t& i,
-                          std::vector<GrammarElement>* out,
-                          std::unordered_map<std::string, size_t>* name_to_id,
-                          std::vector<GrammarRule>* rules,
-                          std::string& err) {
+                           std::vector<GrammarElement>* out,
+                           std::unordered_map<std::string, size_t>* name_to_id,
+                           std::vector<GrammarRule>* rules,
+                           std::string& err) {
     if (i >= src.size()) { err = "unexpected end"; return; }
     size_t start = out->size();
     char c = src[i];
@@ -272,10 +275,10 @@ static void parse_element(std::string_view src, size_t& i,
 }
 
 static void parse_group(std::string_view src, size_t& i,
-                        std::vector<GrammarElement>* out,
-                        std::unordered_map<std::string, size_t>* name_to_id,
-                        std::vector<GrammarRule>* rules,
-                        std::string& err) {
+                         std::vector<GrammarElement>* out,
+                         std::unordered_map<std::string, size_t>* name_to_id,
+                         std::vector<GrammarRule>* rules,
+                         std::string& err) {
     i++; // skip (
     parse_alternatives(src, i, out, name_to_id, rules, err);
     if (!err.empty()) return;
@@ -284,10 +287,10 @@ static void parse_group(std::string_view src, size_t& i,
 }
 
 static void parse_alternative(std::string_view src, size_t& i,
-                              std::vector<GrammarElement>* out,
-                              std::unordered_map<std::string, size_t>* name_to_id,
-                              std::vector<GrammarRule>* rules,
-                              std::string& err) {
+                               std::vector<GrammarElement>* out,
+                               std::unordered_map<std::string, size_t>* name_to_id,
+                               std::vector<GrammarRule>* rules,
+                               std::string& err) {
     while (i < src.size() && src[i] != '|' && src[i] != ')' && src[i] != '\n' && src[i] != '\r') {
         skip_ws(src, i);
         if (i >= src.size() || src[i] == '|' || src[i] == ')' || src[i] == '\n' || src[i] == '\r') break;
@@ -297,10 +300,10 @@ static void parse_alternative(std::string_view src, size_t& i,
 }
 
 static void parse_alternatives(std::string_view src, size_t& i,
-                               std::vector<GrammarElement>* out,
-                               std::unordered_map<std::string, size_t>* name_to_id,
-                               std::vector<GrammarRule>* rules,
-                               std::string& err) {
+                                std::vector<GrammarElement>* out,
+                                std::unordered_map<std::string, size_t>* name_to_id,
+                                std::vector<GrammarRule>* rules,
+                                std::string& err) {
     parse_alternative(src, i, out, name_to_id, rules, err);
     if (!err.empty()) return;
     while (i < src.size() && src[i] == '|') {
@@ -367,31 +370,12 @@ bool Grammar::parse(const std::string& gbnf, Grammar& out, std::string& error) {
         elems.push_back({ElemType::End, 0});
         out.m_rules[rid] = std::move(elems);
 
-        // Left-recursion check: the rule may not reach itself from a
-        // leftmost position (start of the rule or right after an Alt
-        // separator, before any consuming element of that alternative).
-        // Forward references to later rules are legal.
-        // Aux rules (created by quantifiers) are appended later and are
-        // not checked here — their self-references are non-leftmost.
-        {
-            bool left = true;
-            for (const auto& e : out.m_rules[rid]) {
-                if (e.type == ElemType::Alt) {
-                    left = true;
-                } else if (e.type == ElemType::RuleRef) {
-                    if (left && e.value == rid) {
-                        error = "left recursion detected";
-                        return false;
-                    }
-                    left = false;
-                } else if (e.type != ElemType::End) {
-                    left = false;
-                }
-            }
+        // Aux rules (from quantifiers) live after named rules.
+        while (out.m_rules.size() > names.size()) {
+            out.m_rules.back().push_back({ElemType::End, 0});
+            break;
         }
     }
-
-    if (out.m_rules.empty()) { error = "empty grammar"; return false; }
     return true;
 }
 
@@ -476,8 +460,8 @@ bool Grammar::match_partial_char(const GrammarElement* pos) const {
 // ── close_stack_set (extracted Phase A) ───────────────────────────────────
 
 static void close_stack_set(const std::vector<GrammarRule>& rules,
-                            std::vector<Stack> input,
-                            std::vector<Stack>& out) {
+                             std::vector<Stack> input,
+                             std::vector<Stack>& out) {
     // Expand RuleRefs / skip Alts / pop Ends until every stack's top is a
     // consuming element or the stack is empty (rule complete = accepting).
     std::vector<Stack> todo = std::move(input);
@@ -586,7 +570,7 @@ static size_t class_advance_end(const GrammarRule& rule, size_t pos) {
 }
 
 static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
-                          bool negated) {
+                           bool negated) {
     bool any_matches = false;
     size_t i = pos;
     bool first = true;
@@ -623,7 +607,7 @@ static bool class_matches(const GrammarRule& rule, size_t pos, uint8_t byte,
 // ── advance_stack (llama.cpp closure model) ───────────────────────────────
 
 void Grammar::advance_stack(const Stack& stack, uint8_t byte,
-                            std::vector<Stack>& out) const {
+                             std::vector<Stack>& out) const {
     // Phase A — CLOSURE: expand RuleRefs (llama.cpp advance_stack).
     std::vector<Stack> closed;
     close_stack_set(m_rules, {stack}, closed);
@@ -697,6 +681,92 @@ void Grammar::advance_stack(const Stack& stack, uint8_t byte,
     }
 }
 
+// ── first-byte mask helpers ───────────────────────────────────────────────
+
+// Class member values are UTF-8 bytes (the parser byte-splits multi-byte
+// ranges), used directly.
+
+// OR the bytes that can start a match at (rule_id, pos) into first[4].
+// RuleRef heads recurse into the sub-rule's head (a fresh stack sits on
+// root's RuleRef, so this is what makes the first mask correct); Alt
+// elements are transparent separators (the closure forks before them).
+// Memoised per compute_mask call; in_progress breaks rule-reference cycles
+// (a cycle contributes nothing new to FIRST bytes).
+static void elem_first(const std::vector<GrammarRule>& rules, int rule_id, size_t pos,
+                       uint64_t first[4],
+                       std::map<std::pair<int, size_t>, std::array<uint64_t, 4>>& memo,
+                       std::set<std::pair<int, size_t>>& in_progress) {
+    if (rule_id < 0 || rule_id >= (int) rules.size()) return;
+    const GrammarRule& rule = rules[(size_t) rule_id];
+    if (pos >= rule.size()) return;
+    const std::pair<int, size_t> key{rule_id, pos};
+    auto hit = memo.find(key);
+    if (hit != memo.end()) {
+        for (int i = 0; i < 4; i++) first[i] |= hit->second[i];
+        return;
+    }
+    if (in_progress.count(key)) return;   // cycle: nothing new
+    in_progress.insert(key);
+
+    uint64_t t[4] = {0, 0, 0, 0};
+    auto allow = [&](uint8_t b) { t[b >> 6] |= (1ULL << (b & 63)); };
+    auto forbid = [&](uint8_t b) { t[b >> 6] &= ~(1ULL << (b & 63)); };
+
+    const GrammarElement& head = rule[pos];
+    if (head.type == ElemType::Char || head.type == ElemType::CharNot) {
+        const bool negated = head.type == ElemType::CharNot;
+        if (negated) { t[0] = t[1] = t[2] = t[3] = ~0ULL; }   // start from the complement
+        // Walk the member units exactly like class_matches: a unit is
+        // Char/CharNot(v) + CharAlt(terminator) (single member) or
+        // Char/CharNot(lo) + CharRngUpper(hi) (range).  A Char/CharNot with
+        // any other follower is a lone literal char — a member only at the
+        // chain start (it is the matched position there); a later lone char
+        // is the next byte position and ends the chain.  Unlike
+        // class_matches there is NO early exit: the mask needs every member.
+        size_t i = pos;
+        bool first = true;
+        while (i < rule.size()) {
+            const GrammarElement& e = rule[i];
+            if (e.type != ElemType::Char && e.type != ElemType::CharNot) break;
+            if (i + 1 < rule.size()) {
+                const GrammarElement& n = rule[i + 1];
+                if (n.type == ElemType::CharRngUpper) {
+                    for (uint32_t c = e.value; c <= n.value && c < 256; c++) {
+                        if (negated) forbid((uint8_t) c); else allow((uint8_t) c);
+                    }
+                    i += 2;
+                    first = false;
+                } else if (n.type == ElemType::CharAlt) {
+                    if (negated) forbid((uint8_t) e.value); else allow((uint8_t) e.value);
+                    i += 2;
+                    first = false;
+                } else {
+                    // Lone literal char: member only when it IS the matched
+                    // position.
+                    if (first) {
+                        if (negated) forbid((uint8_t) e.value); else allow((uint8_t) e.value);
+                    }
+                    break;
+                }
+            } else {
+                if (first) {
+                    if (negated) forbid((uint8_t) e.value); else allow((uint8_t) e.value);
+                }
+                break;
+            }
+        }
+    } else if (head.type == ElemType::RuleRef) {
+        elem_first(rules, (int) head.value, 0, t, memo, in_progress);
+    } else if (head.type == ElemType::Alt) {
+        elem_first(rules, rule_id, pos + 1, t, memo, in_progress);
+    }
+    // End / Token / others: no first bytes here.
+
+    memo[key] = {t[0], t[1], t[2], t[3]};
+    for (int i = 0; i < 4; i++) first[i] |= t[i];
+    in_progress.erase(key);
+}
+
 // ── compute_mask ──────────────────────────────────────────────────────────
 
 void Grammar::compute_mask() const {
@@ -712,6 +782,20 @@ void Grammar::compute_mask() const {
     std::vector<char> is_eog((size_t) m_vocab_size, 0);
     for (int eid : m_eog_ids)
         if (eid >= 0 && eid < m_vocab_size) is_eog[(size_t) eid] = 1;
+
+    // Allowed first bytes = union over the live stacks of the bytes that can
+    // start a match at each top (recursive over RuleRef heads so raw
+    // unclosed stacks like the fresh [0:0] work).
+    uint64_t allowed_first[4] = {0, 0, 0, 0};
+    {
+        std::map<std::pair<int, size_t>, std::array<uint64_t, 4>> fb_memo;
+        std::set<std::pair<int, size_t>> fb_in_progress;
+        for (const auto& stack : m_stacks) {
+            if (stack.empty()) continue;
+            const StackElem& top = stack.back();
+            elem_first(m_rules, (int) top.rule_id, top.pos, allowed_first, fb_memo, fb_in_progress);
+        }
+    }
 
     for (const auto& stack : m_stacks) {
         // EOG allowed iff any live stack is empty (accepting).
@@ -733,13 +817,11 @@ void Grammar::compute_mask() const {
             const std::string& tok = m_tokens[tid];
             if (tok.empty() || is_eog[tid]) continue; // EOG handled above.
 
-            // Continuation-byte tokens: allowed ONLY when m_n_remain > 0.
-            // When m_n_remain == 0 a lone continuation byte is illegal.
-            if ((static_cast<uint8_t>(tok[0]) & 0xC0) == 0x80) {
-                if (m_n_remain == 0) continue;
-            }
-            // Continuation-byte tokens: allowed when m_n_remain > 0
-            // and the grammar element expects a multi-byte char.
+            // Continuation-byte tokens: when a partial char is pending
+            // (m_n_remain > 0) only continuations are legal (handled below).
+            // With no pending partial a leading continuation byte is legal
+            // exactly when a stack top accepts it as a plain byte (e.g.
+            // string content) — the first-byte set below decides.
             if ((static_cast<uint8_t>(tok[0]) & 0xC0) == 0x80 && m_n_remain > 0) {
                 switch (elem.type) {
                     case ElemType::Char:
@@ -765,25 +847,14 @@ void Grammar::compute_mask() const {
                 continue;
             }
 
-            // Normal tokens: walk ALL bytes through a fresh copy of the
-            // current stack set via advance_stack (dedup sort+unique after
-            // each byte); allowed iff every byte consumed and ≥1 stack survives.
-            std::vector<Stack> walk_stacks;
-            for (const auto& st : m_stacks)
-                if (!st.empty()) walk_stacks.push_back(st);
-            bool ok = true;
-            for (size_t bi = 0; bi < tok.size(); bi++) {
-                std::vector<Stack> next_walk;
-                for (const auto& ws : walk_stacks) {
-                    advance_stack(ws, static_cast<uint8_t>(tok[bi]), next_walk);
-                }
-                // Dedup.
-                std::sort(next_walk.begin(), next_walk.end());
-                next_walk.erase(std::unique(next_walk.begin(), next_walk.end()), next_walk.end());
-                if (next_walk.empty()) { ok = false; break; }
-                walk_stacks = std::move(next_walk);
-            }
-            if (ok) m_mask[tid / 64] |= (1ULL << (tid % 64));
+            // First-byte mask: the token's first byte decides; a multi-byte
+            // token whose later bytes fail the strict accept() is rejected
+            // there and the sampler retries (main.cpp).  Mid-UTF8 (n_remain
+            // > 0) only continuation tokens are legal — handled above.
+            if (m_n_remain > 0) continue;
+            const uint8_t b0 = (uint8_t) tok[0];
+            if (allowed_first[b0 >> 6] & (1ULL << (b0 & 63)))
+                m_mask[tid / 64] |= (1ULL << (tid % 64));
         }
     }
 
@@ -840,15 +911,16 @@ void Grammar::accept(int token_id) {
     const std::string& tok = m_tokens[token_id];
     if (tok.empty()) return;
 
-    std::vector<Stack> walk_from;
-    for (const auto& st : m_stacks)
-        if (!st.empty()) walk_from.push_back(st);
+    // Advance all stacks byte-by-byte.  Each byte walks from the state the
+    // previous byte committed (m_stacks), so multi-byte tokens consume
+    // byte-by-byte against the evolving grammar state.  advance_stack passes
+    // completed (empty) stacks through unchanged, so accepting paths survive
+    // inside a multi-byte token.
     std::vector<Stack> new_stacks;
-
     for (size_t byte_idx = 0; byte_idx < tok.size(); byte_idx++) {
         uint8_t byte = static_cast<uint8_t>(tok[byte_idx]);
         new_stacks.clear();
-        for (const auto& stk : walk_from) {
+        for (const auto& stk : m_stacks) {
             advance_stack(stk, byte, new_stacks);
         }
         std::sort(new_stacks.begin(), new_stacks.end());
