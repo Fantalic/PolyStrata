@@ -129,14 +129,53 @@ def _int_range(lo: int, hi: int) -> str:
     parts.append(_same_len(tail_start, hi_s))
     return " | ".join(parts)
 
+def _ge_fill(x: str) -> str:
+    """GBNF alternation matching every digit string of length |x| that is >= x.
+
+    Flat one-pass form: exceed x at some position p (exact prefix + a digit
+    class above x[p] + free tail), or match x exactly.  This replaces the old
+    recursive `_same_len(tail, '9'*k)` branch — same accepted set, but linear
+    size instead of a call tree that doubled per digit (a `minimum: 0` with no
+    maximum — the 19-digit range to 2**63-1 — used to build ~41M chars).
+    """
+    n = len(x)
+    if n == 1:
+        return _fmt("9") if x == "9" else f"[{x}-9]"
+    parts: List[str] = []
+    for p in range(n):
+        if x[p] == "9":
+            continue                     # no digit above 9: nothing to exceed with
+        prefix = _fmt(x[:p]) if p else ""
+        cls = f"[{chr(ord(x[p]) + 1)}-9]"
+        fill = " ".join(["[0-9]"] * (n - p - 1))
+        parts.append(f"{prefix}{cls}{' ' + fill if fill else ''}")
+    parts.append(_fmt(x))                # exactly x
+    return " | ".join(parts)
+
+def _le_fill(y: str) -> str:
+    """GBNF alternation matching every digit string of length |y| that is <= y (mirror of _ge_fill)."""
+    n = len(y)
+    if n == 1:
+        return _fmt("0") if y == "0" else f"[0-{y}]"
+    parts: List[str] = []
+    for p in range(n):
+        if y[p] == "0":
+            continue                     # no digit below 0
+        prefix = _fmt(y[:p]) if p else ""
+        cls = f"[0-{chr(ord(y[p]) - 1)}]"
+        fill = " ".join(["[0-9]"] * (n - p - 1))
+        parts.append(f"{prefix}{cls}{' ' + fill if fill else ''}")
+    parts.append(_fmt(y))                # exactly y
+    return " | ".join(parts)
+
 def _same_len(a: str, b: str) -> str:
     """Alternation for same-length numeric strings a..b via prefix-split.
 
     At the first differing digit d (shared prefix P, k remaining digits):
-      (a) P + a[d] + <a_tail .. 99..9>   (recursive ??? NOT a free [0-9] fill,
-           which would wrongly admit values below a)
+      (a) P + a[d] + <every tail >= a[d+1..]>   (flat _ge_fill — NOT a free
+           [0-9] fill, which would wrongly admit values below a)
       (b) P + d + [0-9] fill for each mid digit
-      (c) P + b[d] + <00..0 .. b_tail>   (recursive)
+      (c) P + b[d] + <every tail <= b[d+1..]>   (flat _le_fill)
     Digit literals are quoted (raw digits would read as rule references).
     """
     if a == b: return _fmt(a)
@@ -151,10 +190,16 @@ def _same_len(a: str, b: str) -> str:
         # Single differing last digit: one byte-class covers a[i]..b[i].
         return f"{cpfx}[{a[i]}-{b[i]}]"
     parts: List[str] = []
-    parts.append(f"{cpfx}{_fmt(a[i])} {_same_len(a[i + 1:], '9' * k)}")
+    # The _ge_fill/_le_fill expansions are alternations; parens keep them
+    # attached to the leading digit (unparenthesized, the later branches would
+    # lose the prefix and match wrong full numbers).  Single-piece expansions
+    # (one class/literal) need no parens.
+    ge = _ge_fill(a[i + 1:])
+    le = _le_fill(b[i + 1:])
+    parts.append(f"{cpfx}{_fmt(a[i])} ({ge})" if " | " in ge else f"{cpfx}{_fmt(a[i])} {ge}")
     for dd in range(oda + 1, odb):
         parts.append(f"{cpfx}{_fmt(chr(dd))} {fill}")
-    parts.append(f"{cpfx}{_fmt(b[i])} {_same_len('0' * k, b[i + 1:])}")
+    parts.append(f"{cpfx}{_fmt(b[i])} ({le})" if " | " in le else f"{cpfx}{_fmt(b[i])} {le}")
     return " | ".join(parts)
 
 def _pattern_to_grammar(pattern: str) -> str:
@@ -442,23 +487,34 @@ class _Compiler:
         props: List[Tuple[str, Dict[str, Any]]] = []
         req: List[str] = []
         seen_req: Set[str] = set()
+        add_prop: Any = None
         for sub in schemas:
             if not isinstance(sub, dict) or not sub:
                 continue
+            # required accumulates from EVERY member (constraint-only members
+            # like {"required": [...]} are valid mergeable parts of an allOf).
+            for k in sub.get("required", []):
+                if k not in seen_req:
+                    seen_req.add(k)
+                    req.append(k)
             if sub.get("type") == "object" or "properties" in sub:
                 props.extend(sub.get("properties", {}).items())
-                for k in sub.get("required", []):
-                    if k not in seen_req:
-                        seen_req.add(k)
-                        req.append(k)
+                # additionalProperties: false from any member propagates to
+                # the merged object; a schema-form additionalProperties
+                # cannot be intersected here.
+                ap = sub.get("additionalProperties")
+                if ap is False:
+                    add_prop = False
+                elif isinstance(ap, dict):
+                    raise CompileError("allOf: additionalProperties schema cannot be merged")
                 continue
-            if set(sub) <= {"description", "title", "default", "examples"}:
+            if set(sub) <= {"description", "title", "default", "examples", "required"}:
                 continue
             # Non-object children (string constraints, enums, ...) cannot be
             # merged here ??? silently dropping them would under-constrain.
             raise CompileError("allOf: only object schemas can be merged")
         if props:
-            return self._build_obj(props, req, rn, None)
+            return self._build_obj(props, req, rn, add_prop)
         return self._add_rule(rn, self._ensure_prim("value"))
 
     def _visit_obj(self, s: Dict[str, Any], rn: str) -> str:
