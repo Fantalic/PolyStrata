@@ -6898,6 +6898,15 @@ def make_handler(svc: Service):
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
+            # A grammar-constrained request cannot carry a think wrapper (the
+            # mask rules every pick, so the forced JSON would land inside the
+            # thinking channel and the answer out empty).  reasoning_effort
+            # False is the level that renders thinking off; it must be set
+            # BEFORE openai_to_messages builds the template kwargs from it.
+            rf = req.get("response_format")
+            if (req.get("grammar") is not None or
+                    (isinstance(rf, dict) and rf.get("type") in ("json_schema", "json_object"))):
+                req["reasoning_effort"] = False
             messages, tools, kw = openai_to_messages(req)
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
@@ -7152,6 +7161,10 @@ def make_handler(svc: Service):
                 raise ValueError("grammar-constrained decoding is not supported with batched requests")
             if gbnf is not None:
                 req["grammar_hex"] = gbnf
+                # Same as the OpenAI route: a constrained generation cannot
+                # carry a think wrapper (the mask rules every pick), so the
+                # forced JSON must not land inside the thinking channel.
+                req["reasoning_effort"] = False
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
