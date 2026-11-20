@@ -548,16 +548,16 @@ struct Session {
                 // A repeat that fills the window, from a match of a length that has been right nine times in ten,
                 // is taken as it is: the block would mostly say the same, and asking it takes time.  Otherwise the
                 // block guesses, each guess from the one before, while a guess more pays (Guesses).
-                const bool blocks = engine.drafts() && room && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
+                // Grammar-constrained rounds are serial: no draft block is
+                // asked, so the override below can never be overwritten.
+                const bool blocks = engine.drafts() && room && !gs.active()
+                    && !(k == widest - 1 && policy.lookup_rate(match) >= 0.9);
                 const bool ask = guesses.begin(blocks, policy);
                 // the round's time, as the policy counts it: a window of `in` tokens wrote n of them
                 const auto count = [&](int in, int n) {
                     return guesses.end(in, n, ms_since(round), engine.took_record());
                 };
                 strata::spec::DraftPolicy::Pick use = policy.choose(1, k, match);
-                // grammar-constrained picks are serial: draft tokens are not
-                // grammar-masked, so the fast path is disabled while active.
-                if (gs.active()) use.t = 1;
                 if (ask) {
                     int n_d = 0;
                     for (int32_t from = t; n_d < std::min(most, block_window) - 1 && guesses.wants(n_d); from = d[n_d++]) {
@@ -568,6 +568,10 @@ struct Session {
                     }
                     use = policy.choose(1 + n_d, k, match);
                 }
+                // grammar-constrained picks are serial: draft tokens are not
+                // grammar-masked, so the fast path is disabled while active.
+                // Pinned after the ask block, whose choose() would overwrite it.
+                if (gs.active()) use.t = 1;
                 if (use.t == 1) {
                     engine.eval(&t, 1, true);
                     kept.read(&t, 1);
