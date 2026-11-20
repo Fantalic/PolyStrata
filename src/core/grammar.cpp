@@ -49,8 +49,7 @@ size_t CacheKeyHash::operator()(const CacheKey& k) const {
         v += 0x9e3779b1 + (h << 6) + (h >> 2);
         h ^= v;
     };
-    for (const auto& stk : k.stacks)
-        for (const auto& e : stk) { mix(e.rule_id); mix(e.pos); }
+    for (const auto& e : k.tops) { mix(e.rule_id); mix(e.pos); }
     mix(k.partial_value);
     mix(k.n_remain);
     return h;
@@ -391,6 +390,25 @@ void Grammar::set_vocab(std::vector<std::string> token_bytes, std::vector<int> e
     m_partial_value = 0;
     m_n_remain = 0;
     m_cache.clear();
+
+    // Precompute the vocab-shaped structures the mask fills use: EOG flags,
+    // the EOG token list (empty-string tokens are legacy EOG, see
+    // compute_mask), and non-EOG tokens grouped by first byte so mask fills
+    // are bucket ORs instead of a vocab-wide string walk per stack per step.
+    m_is_eog.assign((size_t) m_vocab_size, 0);
+    for (int eid : m_eog_ids)
+        if (eid >= 0 && eid < m_vocab_size) m_is_eog[(size_t) eid] = 1;
+    m_eog_token_ids.clear();
+    m_tokens_by_first_byte.assign(256, {});
+    for (int tid = 0; tid < m_vocab_size; ++tid) {
+        const std::string& tok = m_tokens[(size_t) tid];
+        if (tok.empty() || m_is_eog[(size_t) tid]) {
+            m_eog_token_ids.push_back(tid);
+            continue;
+        }
+        m_tokens_by_first_byte[(uint8_t) tok[0]].push_back(tid);
+    }
+    m_first_memo.clear();
 
     // Initialise stacks from the root rule (rule 0). Rule 0 is never expanded
     // via a RuleRef, so its own alternatives must be enumerated here: one
@@ -772,89 +790,96 @@ static void elem_first(const std::vector<GrammarRule>& rules, int rule_id, size_
 void Grammar::compute_mask() const {
     m_mask.assign((m_vocab_size + 63) / 64, 0ULL);
 
-    // Cache lookup.
-    CacheKey key{m_stacks, m_partial_value, m_n_remain};
+    // Build the cache key from the stack TOPS (see CacheKey): the mask only
+    // ever reads stack.back() and stack.empty(), so equal tops + partial +
+    // remain means equal mask.  Stack bodies differ all the time in
+    // production, so the tops key is what makes the cache hit across steps.
+    CacheKey key;
+    key.partial_value = m_partial_value;
+    key.n_remain      = m_n_remain;
+    bool eog_allowed = false;
+    {
+        std::vector<StackElem> tops;
+        tops.reserve(m_stacks.size());
+        for (const auto& stack : m_stacks) {
+            if (stack.empty()) { eog_allowed = true; continue; }
+            tops.push_back(stack.back());
+        }
+        std::sort(tops.begin(), tops.end());
+        tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
+        key.tops = std::move(tops);
+    }
     auto it = m_cache.find(key);
     if (it != m_cache.end()) { m_mask = it->second; m_mask_valid = true; return; }
 
-    // EOG ids come from the engine (set_vocab); empty-string tokens are the
-    // legacy convention (phase-1 tests).  Both are EOG for masking purposes.
-    std::vector<char> is_eog((size_t) m_vocab_size, 0);
-    for (int eid : m_eog_ids)
-        if (eid >= 0 && eid < m_vocab_size) is_eog[(size_t) eid] = 1;
-
-    // Allowed first bytes = union over the live stacks of the bytes that can
-    // start a match at each top (recursive over RuleRef heads so raw
-    // unclosed stacks like the fresh [0:0] work).
+    // Allowed first bytes = union over the live stack tops of the bytes that
+    // can start a match there (recursive over RuleRef heads so raw unclosed
+    // stacks like the fresh [0:0] work).  The memo is a member: first-byte
+    // sets depend only on the parsed rules, which accept() never touches, so
+    // entries stay valid across steps; set_vocab clears them.  Cycle-guarded
+    // (truncated) entries are only ever written for RuleRef-head keys, which
+    // the closure never leaves as stack tops, so no truncated entry is read.
     uint64_t allowed_first[4] = {0, 0, 0, 0};
     {
-        std::map<std::pair<int, size_t>, std::array<uint64_t, 4>> fb_memo;
         std::set<std::pair<int, size_t>> fb_in_progress;
-        for (const auto& stack : m_stacks) {
-            if (stack.empty()) continue;
-            const StackElem& top = stack.back();
-            elem_first(m_rules, (int) top.rule_id, top.pos, allowed_first, fb_memo, fb_in_progress);
+        for (const auto& top : key.tops) {
+            if (top.rule_id == 0xFFFFFFFFu) continue;   // empty-stack sentinel
+            elem_first(m_rules, (int) top.rule_id, top.pos, allowed_first,
+                       m_first_memo, fb_in_progress);
         }
     }
 
-    for (const auto& stack : m_stacks) {
-        // EOG allowed iff any live stack is empty (accepting).
-        if (stack.empty()) {
-            for (int tid = 0; tid < m_vocab_size; tid++) {
-                if (m_tokens[tid].empty() || is_eog[tid])
-                    m_mask[tid / 64] |= (1ULL << (tid % 64));
-            }
-            continue;
-        }
+    // EOG (empty-string tokens and engine EOG ids) is allowed iff any live
+    // stack is empty (accepting); the empty stacks contribute no first bytes.
+    if (eog_allowed)
+        for (int tid : m_eog_token_ids)
+            m_mask[(size_t) tid / 64] |= (1ULL << (tid % 64));
 
-        const StackElem& top = stack.back();
-        const GrammarRule& rule = m_rules[top.rule_id];
-        if (top.pos >= rule.size()) continue;
-
-        const GrammarElement& elem = rule[top.pos];
-
-        for (int tid = 0; tid < m_vocab_size; tid++) {
-            const std::string& tok = m_tokens[tid];
-            if (tok.empty() || is_eog[tid]) continue; // EOG handled above.
-
-            // Continuation-byte tokens: when a partial char is pending
-            // (m_n_remain > 0) only continuations are legal (handled below).
-            // With no pending partial a leading continuation byte is legal
-            // exactly when a stack top accepts it as a plain byte (e.g.
-            // string content) — the first-byte set below decides.
-            if ((static_cast<uint8_t>(tok[0]) & 0xC0) == 0x80 && m_n_remain > 0) {
-                switch (elem.type) {
-                    case ElemType::Char:
-                    case ElemType::CharNot:
-                        if (utf8_byte_count(elem.value) > 1)
-                            m_mask[tid / 64] |= (1ULL << (tid % 64));
-                        break;
-                    case ElemType::CharRngUpper:
-                        if (top.pos > 0) {
-                            const GrammarElement& prev = rule[top.pos - 1];
-                            if (prev.type == ElemType::Char || prev.type == ElemType::CharNot) {
-                                for (uint32_t c = prev.value; c <= elem.value && c <= 0x10FFFF; c++) {
-                                    if (utf8_byte_count(c) > 1) {
-                                        m_mask[tid / 64] |= (1ULL << (tid % 64));
-                                        break;
-                                    }
-                                }
+    if (m_n_remain > 0) {
+        // Mid-UTF-8: only continuation tokens are legal, and only when some
+        // stack top accepts a continuation byte.  The per-stack decision is
+        // hoisted out of the token loop (identical to the old per-token
+        // switch, now run once per top instead of once per stack x token).
+        bool cont_allowed = false;
+        for (const auto& top : key.tops) {
+            if (top.rule_id == 0xFFFFFFFFu) continue;
+            const GrammarRule& rule = m_rules[top.rule_id];
+            if (top.pos >= rule.size()) continue;
+            const GrammarElement& elem = rule[top.pos];
+            bool stack_ok = false;
+            switch (elem.type) {
+                case ElemType::Char:
+                case ElemType::CharNot:
+                    stack_ok = utf8_byte_count(elem.value) > 1;
+                    break;
+                case ElemType::CharRngUpper:
+                    if (top.pos > 0) {
+                        const GrammarElement& prev = rule[top.pos - 1];
+                        if (prev.type == ElemType::Char || prev.type == ElemType::CharNot) {
+                            for (uint32_t c = prev.value; c <= elem.value && c <= 0x10FFFF; c++) {
+                                if (utf8_byte_count(c) > 1) { stack_ok = true; break; }
                             }
                         }
-                        break;
-                    default: break;
-                }
-                continue;
+                    }
+                    break;
+                default: break;
             }
-
-            // First-byte mask: the token's first byte decides; a multi-byte
-            // token whose later bytes fail the strict accept() is rejected
-            // there and the sampler retries (main.cpp).  Mid-UTF8 (n_remain
-            // > 0) only continuation tokens are legal — handled above.
-            if (m_n_remain > 0) continue;
-            const uint8_t b0 = (uint8_t) tok[0];
-            if (allowed_first[b0 >> 6] & (1ULL << (b0 & 63)))
-                m_mask[tid / 64] |= (1ULL << (tid % 64));
+            if (stack_ok) { cont_allowed = true; break; }
+        }
+        if (cont_allowed) {
+            for (int b = 0x80; b < 0xC0; ++b)
+                for (int tid : m_tokens_by_first_byte[(size_t) b])
+                    m_mask[(size_t) tid / 64] |= (1ULL << (tid % 64));
+        }
+    } else {
+        // Normal path: every non-EOG token is decided by its first byte via
+        // the bucket tables built in set_vocab.  A multi-byte token whose
+        // later bytes fail the strict accept() is rejected there and the
+        // sampler retries.
+        for (int b = 0; b < 256; ++b) {
+            if (!(allowed_first[b >> 6] & (1ULL << (b & 63)))) continue;
+            for (int tid : m_tokens_by_first_byte[(size_t) b])
+                m_mask[(size_t) tid / 64] |= (1ULL << (tid % 64));
         }
     }
 

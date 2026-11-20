@@ -2,6 +2,9 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <map>
+#include <array>
+#include <utility>
 #include <cstdint>
 
 namespace strata::core {
@@ -53,8 +56,15 @@ inline bool operator<(const StackElem& a, const StackElem& b) {
 
 using Stack = std::vector<StackElem>;
 
+// Mask cache key: everything the mask computation actually reads.  The mask
+// only reads each stack's back() (first-byte union + the mid-UTF8 element
+// switch) and whether a stack is empty (EOG), so stack bodies are irrelevant
+// — keying on the dedup'd TOPS makes the cache hit across decode steps
+// (llama.cpp's transposition-table design).  Empty stacks become the
+// sentinel top {0xFFFFFFFF, 0}: they add the EOG allowance to the mask, so
+// they must be part of the key.
 struct CacheKey {
-    std::vector<Stack> stacks;
+    std::vector<StackElem> tops;
     uint32_t partial_value = 0;
     int      n_remain      = 0;
 };
@@ -64,7 +74,7 @@ struct CacheKeyHash {
 };
 
 inline bool operator==(const CacheKey& a, const CacheKey& b) {
-    return a.stacks == b.stacks &&
+    return a.tops == b.tops &&
            a.partial_value == b.partial_value &&
            a.n_remain == b.n_remain;
 }
@@ -129,6 +139,17 @@ private:
     std::vector<std::string> m_tokens;
     std::vector<int>         m_eog_ids;
     int m_vocab_size = 0;
+
+    // Vocab-shaped structures built once in set_vocab so mask fills are
+    // bucket ORs instead of a vocab-wide string walk per stack per step.
+    std::vector<char>             m_is_eog;               // indexed by token id
+    std::vector<int>              m_eog_token_ids;        // empty-string or EOG ids
+    std::vector<std::vector<int>> m_tokens_by_first_byte; // 256 buckets, non-EOG
+
+    // First-byte sets per (rule, pos), computed by elem_first and kept across
+    // steps: they depend only on m_rules, which accept() never mutates.
+    // Cleared in set_vocab.
+    mutable std::map<std::pair<int, size_t>, std::array<uint64_t, 4>> m_first_memo;
 
     std::vector<GrammarRule> m_rules;
 
