@@ -1,7 +1,8 @@
 """JSON response formats at the HTTP boundary: prompt once, validate before delivery.
 
-The native engine has no grammar decoder. Failed generations are errors, never
-silently retried or returned as successful structured output.
+response_format json_schema / json_object compiles to a GBNF grammar sent to the engine for
+grammar-constrained decoding; validation stays as defense in depth.
+Failed generations are errors, never silently retried or returned as successful structured output.
 
 `jsonschema` is optional (no new hard dependency of the server): json_object needs only the standard library, and
 json_schema is checked against its schema when the package is installed - without it, only that the answer is one
@@ -150,6 +151,57 @@ def prepare_format(response_format, messages, with_tools=False):
     else:
         messages.insert(0, {"role": "system", "content": directive})
     return messages, validator
+
+
+def prepare_grammar(response_format, grammar_field=None):
+    """Return hex-encoded GBNF for grammar-constrained decoding, or None.
+
+    Takes an explicit GBNF ``grammar_field`` (raw GBNF text, llama.cpp-style)
+    if given, else compiles the response_format (json_schema -> schema_to_grammar, json_object ->
+    json_object_grammar). Raises CompileError for unsupported schemas.
+    """
+    from serve.json_schema_to_grammar import schema_to_grammar, json_object_grammar, CompileError
+
+    # 1. Explicit grammar field takes priority (llama.cpp-style raw GBNF text;
+    #    it is hex-encoded here because the engine's GEN line is space-delimited)
+    if grammar_field is not None:
+        if not isinstance(grammar_field, str) or not grammar_field:
+            raise ValueError("response_format grammar field must be a non-empty string")
+        hex_encoded = grammar_field.encode("utf-8").hex()
+        if len(hex_encoded) > 2_000_000:
+            raise ValueError("grammar too large")
+        return hex_encoded
+
+    # 2. No response_format and no grammar_field → nothing to do
+    if response_format is None:
+        return None
+
+    if not isinstance(response_format, dict):
+        raise ValueError("response_format must be an object")
+
+    kind = response_format.get("type")
+
+    # 3. json_schema → compile the schema to GBNF
+    if kind == "json_schema":
+        spec = response_format.get("json_schema")
+        if not isinstance(spec, dict) or not isinstance(spec.get("schema"), dict):
+            raise ValueError("response_format.json_schema needs a schema object")
+        schema = spec["schema"]
+        try:
+            gbnf = schema_to_grammar(schema)
+        except CompileError as error:
+            raise ValueError(f"response_format.json_schema is not supported by the grammar compiler: {error}")
+    # 4. json_object → use the built-in object grammar
+    elif kind == "json_object":
+        gbnf = json_object_grammar()
+    # 5. text (or unknown — prepare_format already errors on unknown) → no grammar
+    else:
+        return None
+
+    hex_encoded = gbnf.encode("utf-8").hex()
+    if len(hex_encoded) > 2_000_000:
+        raise ValueError("grammar too large")
+    return hex_encoded
 
 
 def _extract_json(text: str) -> str:
