@@ -5106,16 +5106,23 @@ class Service:
 
     def _release_turn(self, entry):
         """The turn is over (ExitStack at `with turn:`'s end): the request leaves the admission
-        registry, then the FIFO goes to the next request (which re-decides with the fresh state)."""
-        self.affinity.unregister(entry.id if entry else None)
-        self.fifo.release()
+        registry, then the FIFO goes to the next request (which re-decides with the fresh state).
+        The FIFO release must not depend on the unregister succeeding."""
+        try:
+            self.affinity.unregister(entry.id if entry else None)
+        finally:
+            self.fifo.release()
 
     def _served_turn(self, ids, entry=None):
         """The request's prompt ran on the engine (still holding the FIFO): the admission remembers
         the conversation and arms the hold when no continuation is already waiting.  `entry` is the
         request's own admission entry: served() runs before _release_turn (ExitStack LIFO), so the
-        entry is still registered and must not count as its own follower."""
-        self.affinity.served(ids, entry)
+        entry is still registered and must not count as its own follower.  A served() failure must
+        not stop the unwind: the FIFO release below it depends on it."""
+        try:
+            self.affinity.served(ids, entry)
+        except Exception as e:
+            print(f"[strata] affinity: served() failed, the turn state may be stale: {e!r}", flush=True)
 
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
@@ -5235,26 +5242,34 @@ class Service:
                 # while a continuation of the hot conversation waits (or the hold waits for it) - it re-checks every
                 # second and keeps the keep-alives flowing.
                 got = False
+                held = False                      # the FIFO is ours and the turn callback has not taken it
                 try:
                     while not got:
                         was = entry.deferred if entry else False
                         got = self.fifo.acquire(timeout=QUEUE_BEAT_S)
+                        if got:
+                            held = True
                         if got and entry is not None and not self.affinity.decide(entry):
+                            self.fifo.release()          # the admission says: someone else goes first
+                            held = False
+                            got = False
                             if not was:              # one line per wait episode, not every re-check
                                 print(f"[strata] affinity: request {entry.id} waits ({entry.reason}) - "
                                       f"{entry.plen} tokens, {entry.snippet[:60]!r}", flush=True)
-                            self.fifo.release()          # the admission says: someone else goes first
-                            got = False
                             time.sleep(AFFINITY_RECHECK_S)   # re-decide about once a second, not in a spin
                         if got:
                             turn.callback(self._release_turn, entry)
+                            held = False              # the ExitStack owns the release now
                         elif cancel.is_set():
                             break
                         else:
                             yield "ping", None
-                except BaseException:                    # the consumer closed us at a ping: no longer queued
+                except BaseException:                # the consumer closed us at a ping: no longer queued
+                    if held:
+                        self.fifo.release()          # acquired but the turn never took it: give it back
                     with self.status_lock:
                         self.status["queued"] -= 1
+                    self.affinity.resume_freeze()
                     self.affinity.unregister(entry.id if entry else None)
                     raise
                 if not got:                              # cancelled while queued
@@ -6720,7 +6735,8 @@ def make_handler(svc: Service):
                 self._json(503, responses_error_body(str(e), "server_error") if path == "/v1/responses"
                            else {"error": {"type": "server_error", "message": str(e)}})
             except ValueError as e:
-                print(f"[strata] 400 invalid request: {e}", flush=True)
+                import traceback
+                print(f"[strata] 400 invalid request: {e}\n{traceback.format_exc()}", flush=True)
                 if path == "/v1/responses":
                     self._json(400, responses_error_body(str(e)))
                 else:

@@ -278,6 +278,16 @@ class Affinity:
             else:
                 self.hold = None                    # expired (or nothing armed): no gap to bridge
 
+    def resume_freeze(self) -> None:
+        """The request that froze the hold's countdown (hold_small pause) died before serving:
+        the busy time is over, the countdown resumes.  served() does this on the normal path;
+        a request that fails mid-flight never reaches it."""
+        with self.lock:
+            if self.hold is not None and self.hold.get("paused_at") is not None:
+                now = time.monotonic()
+                self.hold["until"] += now - self.hold["paused_at"]
+                self.hold["paused_at"] = None
+
     # ---- the monitor page's controls ----------------------------------
     def focus(self, id: str) -> dict:
         with self.lock:
@@ -345,7 +355,7 @@ class Affinity:
         with self.lock:
             waiting = [e.public(self) for e in self.waiting.values()]
             hold = None if self.hold is None else {
-                "remaining_s": round(max(0.0, self.hold["until"] - time.monotonic()), 1),
+                "remaining_s": round(self._hold_left(), 1),
                 "snippet": "", "at": self.hold["at"]}
             focused = None if self.focused is None else dict(self.focused)
             return {"settings": dict(self.settings), "waiting": waiting, "hold": hold,
