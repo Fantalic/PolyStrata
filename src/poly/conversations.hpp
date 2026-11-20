@@ -47,6 +47,8 @@ struct CacheOptions {
     std::function<std::optional<uint64_t>()> host_available;  ///< the host's free bytes now; unset: unknown
     int64_t pre_park_floor_mib = 1024;  ///< idle pre-parking leaves this much physical RAM free; the switch's
                                         ///< park is gated by admit alone, which carries the stricter floor
+    int64_t ram_target_mib = 0;         ///< drop parked banks when free RAM is below this MiB; 0: off
+    std::function<bool(size_t)> wanted; ///< point 3 hook: whether a slot is wanted by a HINT mark; false
     FILE* log = nullptr;       ///< where parking is reported; the server reads these lines
 };
 
@@ -198,6 +200,7 @@ public:
         s.seq = std::move(seq);
         s.prompt = len(s);
         s.stamp = ++clock_;
+        s.used = Clock::now();  // adopted banks must age like resumed ones, else drop_stale skips them forever
     }
 
     // A session file's part of the conversation in the engine, to come back to in another run of the engine
@@ -393,7 +396,8 @@ public:
         if (o_.park_mib < 1 || o_.park_slots < 1 || s.marks.empty() || s.marks.back().pos < o_.park_min) return false;
         const Clock::time_point t0 = Clock::now();
         const int64_t end = s.marks.back().pos, from = saved(s);
-        if (from == end) return true;  // nothing to do, no logging
+        if (from == end) return false;  // everything is already banked: no work this call,
+                                        // so the idle tick's loop falls through to the queue wait
         // One idle tick copies at most a quarter of the budget, and only what the host can spare above the
         // smaller pre-park floor.  A delta bigger than the host's free RAM is refused whole and retried whole
         // every tick - the parked copy never advances, and a later switch destroys the engine's copy wholesale
@@ -412,6 +416,7 @@ public:
 
     // Test hook: set the `used` time of a parked slot to age it past the TTL.
     void set_slot_used(size_t i, std::chrono::steady_clock::time_point tp) { slots_[i].used = tp; }
+    std::chrono::steady_clock::time_point used_at(size_t i) const { return slots_[i].used; }  // test hook: read a slot's used stamp
 
     // Drops the parked conversations the client has not used for `ttl_s` seconds — a session that ended long ago
     // left behind.  Runs in the idle tick, so nothing is waiting: a drop is free and a session that returns
@@ -439,6 +444,10 @@ public:
         }
         return n;
     }
+
+    /// Drops parked banks until free host RAM >= ram_target_mib MiB (fork feature,
+    /// defined in conversations_ram.hpp).
+    size_t drop_for_ram();
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -650,8 +659,9 @@ private:
     // read again), among equals the one not used for longest.  A conversation the client was in within
     // the last `focus` requests keeps its place while any other candidate exists.  The newest parked
     // one never goes (a stale RAM reading must not wipe what just parked).  `keep` is a slot the
-    // caller is about to reuse and is spared.  False: every candidate is protected.
-    bool pick_victim(size_t keep, size_t& out) {
+    // caller is about to reuse and is spared.  `skip` are indices the caller asked to exclude;
+    // False: every candidate is protected.
+    bool pick_victim(size_t keep, size_t& out, const std::vector<size_t>& skip = {}) {
         out = slots_.size();
         size_t newest = 0;
         for (size_t i = 0; i < slots_.size(); ++i)
@@ -661,6 +671,7 @@ private:
             for (size_t i = 0; i < slots_.size(); ++i) {
                 const Slot& s = slots_[i];
                 if (i == cur_ || i == keep || s.seq.empty() || s.stamp == newest) continue;
+                if (!skip.empty() && std::find(skip.begin(), skip.end(), i) != skip.end()) continue;
                 if (pass == 0 && o_.focus > 0 && clock_ - s.stamp <= (uint64_t) o_.focus) continue;
                 if (out == slots_.size() || bank_bytes(i) < bank_bytes(out) ||
                     (bank_bytes(i) == bank_bytes(out) && s.stamp < slots_[out].stamp))
