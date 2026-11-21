@@ -23,6 +23,7 @@ button,input,select{font:inherit}button{cursor:pointer;color:inherit;background:
 .qrow button{padding:4px 10px;font-size:13px;border-radius:7px}
 .queue-empty{padding:14px 20px;color:var(--st-ink-muted)}
 .qrow{cursor:grab}.qrow:active{cursor:grabbing}
+.fsrow{cursor:pointer}.fsrow:hover{background:var(--st-surface-2)}
 .qrow.dragging{opacity:.4}
 .qrow.drag-over{border-top:2px solid var(--st-accent)}
 .qrow .qgrip{cursor:grab;color:var(--st-ink-muted);opacity:.5;padding:0 6px;flex-shrink:0}
@@ -46,11 +47,12 @@ button,input,select{font:inherit}button{cursor:pointer;color:inherit;background:
 <div class="card"><div class="label">Last wall-clock</div><div id="wall" class="value">—</div><div class="small">Includes queue and model loading</div></div>
 <div class="card"><div class="label">Last decode speed</div><div id="speed" class="value">—</div><div class="small">Engine timing · tokens / second</div></div>
 </div>
-<section class="panel" id="queue-panel"><div class="panel-bar"><h2>Request queue</h2><div class="controls"><label class="qflag"><input id="aff-on" type="checkbox"> Affinity</label><label class="qflag"><input id="keep-def" type="checkbox"> Keep banks by default</label><label class="qflag">Hold <input id="hold-s" type="number" min="0" max="600" step="1" style="width:70px"> s</label><button id="aff-apply" class="primary" disabled>Apply</button><button id="skip-wait" disabled>Skip wait</button><button id="cc-clear" disabled>Clear parked</button><button id="queue-toggle">Show</button></div></div>
+<section class="panel" id="queue-panel"><div class="panel-bar"><h2>Request queue</h2><div class="controls"><label class="qflag"><input id="aff-on" type="checkbox"> Affinity</label><label class="qflag"><input id="keep-def" type="checkbox"> Keep banks by default</label><label class="qflag">Hold <input id="hold-s" type="number" min="0" max="600" step="1" style="width:70px"> s</label><button id="aff-apply" class="primary" disabled>Apply</button><button id="skip-wait" disabled>Skip wait</button><button id="cc-clear" disabled>Clear parked</button><button id="finished-toggle" disabled>Show finished</button><button id="queue-toggle">Show</button></div></div>
 <div id="queue-body" hidden>
 <div id="queue-state" class="qstate"></div>
 <div id="cc-clear-note" class="qstate"></div>
 <div id="queue-rows"></div>
+<div id="queue-finished" hidden></div>
 </div>
 </section>
 <section class="panel"><div class="panel-bar"><h2>Requests</h2><div class="filters"><input id="search" aria-label="Filter requests" placeholder="Search ID or endpoint"><select id="filter" aria-label="Request status"><option value="all">All statuses</option><option value="active">Active</option><option value="completed">Completed</option><option value="error">Errors</option></select></div></div>

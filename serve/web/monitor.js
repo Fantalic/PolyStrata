@@ -84,7 +84,7 @@ async function refresh() {
     const [status, history, queue] = await Promise.all([api("/v1/status"), api("/api/requests"), api("/api/queue")]);
     state = status; records = history.requests;
     status.loaded = history.loaded; status.auto_load = history.auto_load;
-    renderQueue(queue);
+    renderQueue(queue, records);
     if (selected && !records.some(r => r.id === selected)) {
       selected = detail = null; $("selection").hidden = true; $("no-selection").hidden = false;
     }
@@ -115,7 +115,7 @@ async function reorderQueue(order) {
   } catch (e) { notice(e.message); }
 }
 
-function renderQueue(q) {
+function renderQueue(q, records) {
   const open = !$("queue-body").hidden;
   $("aff-on").checked = !!q.settings.enabled;
   if (document.activeElement !== $("hold-s")) $("hold-s").value = q.settings.hold_s;
@@ -128,6 +128,7 @@ function renderQueue(q) {
   if (q.hold) state.push(`Holding the turn for the last conversation's follow-up: ${q.hold.remaining_s} s left`);
   if (!q.settings.enabled) state.push("Affinity is off: requests take the turn in arrival order.");
   text("queue-state", state.join("  ·  "));
+  renderFinished(records);
   const rows = $("queue-rows");
   const next = JSON.stringify([q.waiting.map(w => [w.id, w.wanted ? 1 : 0]), q.focused?.id]);
   if (rows.dataset.stamp === next) return;
@@ -165,6 +166,13 @@ function renderQueue(q) {
     keep.disabled = !open;
     keep.onclick = async () => { try { await api("/api/queue/wanted", {id: w.id, wanted: !w.wanted}); await refresh(); } catch (e) { notice(e.message); } };
     row.append(keep);
+    // Session: opens the session view (serve/web/session.html) for this conversation bundle
+    const sess = document.createElement("button");
+    sess.textContent = "Session";
+    const sBundle = w.root_session || w.session_id;
+    if (sBundle) sess.onclick = () => window.open(`/web/session.html?bundle=${encodeURIComponent(sBundle)}`, "_blank");
+    else sess.disabled = true;
+    row.append(sess);
     rows.append(row);
   }
   // drag-and-drop delegation on the tbody
@@ -214,6 +222,49 @@ function renderQueue(q) {
     await reorderQueue(newOrder);
   });
 }
+// ------------------------------------------------------------------ finished sessions
+// The queue panel's second list: the last session bundles that finished, hidden by default,
+// the Show/Hide choice kept in localStorage.  A row opens the session view.
+const FINISHED_KEY = "strata.queue.finished";
+const finishedOn = () => localStorage.getItem(FINISHED_KEY) === "1";
+
+function finishedSessions(records) {
+  const seen = new Map();                       // bundle -> the newest record + count + agents
+  for (const r of records) {                    // the records arrive newest first
+    if (active(r)) continue;
+    const b = r.root_session || r.session_id || "(no session id)";
+    if (!seen.has(b)) seen.set(b, {bundle: b, name: r.session_name || r.snippet || b, agents: new Set(), count: 0, last: r});
+    const s = seen.get(b);
+    s.count++;
+    if (r.agent) s.agents.add(r.agent);
+  }
+  return [...seen.values()];
+}
+
+function renderFinished(records) {
+  const toggle = $("finished-toggle"), fin = $("queue-finished");
+  const sessions = finishedSessions(records || []);
+  toggle.textContent = `${finishedOn() ? "Hide" : "Show"} finished (${sessions.length})`;
+  toggle.disabled = !open;
+  fin.hidden = !finishedOn();
+  const stamp = JSON.stringify(sessions.map(s => [s.bundle, s.count, s.last.id, s.last.state]));
+  if (fin.dataset.stamp === stamp) return;
+  fin.dataset.stamp = stamp;
+  fin.replaceChildren();
+  for (const s of sessions.slice(0, 10)) {
+    const row = document.createElement("div"); row.className = "qrow fsrow";
+    const time = document.createElement("span"); time.className = "qtime"; time.textContent = new Date(s.last.started_at * 1000).toLocaleTimeString();
+    const tag = document.createElement("span"); tag.className = `tag ${s.last.state}`; tag.textContent = s.count === 1 ? s.last.state : `${s.count} req`;
+    const name = document.createElement("span"); name.className = "qsnippet"; name.title = s.name; name.textContent = s.name;
+    const who = document.createElement("span"); who.className = "qpath"; who.textContent = [...s.agents].join(", ") || s.bundle;
+    row.append(time, tag, name, who);
+    if (s.bundle !== "(no session id)") row.onclick = () => window.open(`/web/session.html?bundle=${encodeURIComponent(s.bundle)}`, "_blank");
+    fin.append(row);
+  }
+}
+
+$("finished-toggle").onclick = async () => { localStorage.setItem(FINISHED_KEY, finishedOn() ? "0" : "1"); await refresh(); };
+
 async function control(load) {
   actionError = "";
   operating = true; $("load").disabled = $("unload").disabled = true;

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PolyStrata Session</title>
+<link rel="icon" href="/web/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/web/tokens.css">
+<style>
+*{box-sizing:border-box}body{margin:0;background:var(--st-bg);color:var(--st-ink);font:15px/1.5 var(--st-font)}
+button,input{font:inherit}button{cursor:pointer;color:inherit;background:var(--st-surface-2);border:1px solid var(--st-line);border-radius:9px;padding:8px 13px}button:hover{border-color:var(--st-accent)}button:disabled{opacity:.4;cursor:default}
+[hidden]{display:none!important}
+header{display:flex;align-items:center;gap:16px;padding:16px 28px;border-bottom:1px solid var(--st-line);background:var(--st-surface)}
+header .back{font-size:14px;text-decoration:none;color:var(--st-ink-muted);white-space:nowrap}
+header .back:hover{color:var(--st-accent)}
+h1{margin:0;font-size:20px;letter-spacing:-.4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#s-meta{margin-left:auto;font-size:13px;color:var(--st-ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+main{max-width:1100px;margin:auto;padding:22px 28px;display:flex;flex-direction:column;gap:18px}
+.card,.panel{border:1px solid var(--st-line);border-radius:13px;background:var(--st-surface);overflow:hidden}
+.card{padding:16px 20px}
+.label{font-size:12px;color:var(--st-ink-muted);text-transform:uppercase;letter-spacing:.8px}
+.notice{padding:10px 14px;background:var(--st-danger-tint);color:var(--st-danger-text);border-radius:9px}
+.panel-bar{padding:13px 20px;border-bottom:1px solid var(--st-line);display:flex;align-items:center;justify-content:space-between;gap:12px}
+h2{font-size:16px;margin:0}
+.muted{color:var(--st-ink-muted)}
+.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.tag{border:1px solid var(--st-line);border-radius:6px;padding:2px 9px;font-size:12px;color:var(--st-ink-muted);white-space:nowrap}
+.tag.completed,.tag.running,.tag.streaming{color:var(--st-accent)}
+.tag.error,.tag.disconnected{color:var(--st-danger-text)}
+.tag.queued,.tag.loading{color:var(--st-warn-text)}
+.facts{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--st-ink-muted);margin:8px 0 0}
+.facts b{color:var(--st-ink);font-weight:500;font-variant-numeric:tabular-nums}
+pre{margin:12px 0 0;padding:14px;background:var(--st-bg);border:1px solid var(--st-line);border-radius:9px;font:13px/1.55 var(--st-font-mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow-y:auto}
+#finished-rows{max-height:420px;overflow-y:auto}
+.srow{display:flex;align-items:center;gap:14px;padding:10px 20px;border-bottom:1px solid var(--st-line);font-size:14px;cursor:pointer}
+.srow:last-child{border-bottom:0}
+.srow:hover{background:var(--st-surface-2)}
+.srow .stime{color:var(--st-ink-muted);font-size:12px;white-space:nowrap}
+.srow .stok{font:12px var(--st-font-mono);color:var(--st-ink-muted);white-space:nowrap}
+.srow .ssnip{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srow .swall{font:12px var(--st-font-mono);color:var(--st-ink-muted);white-space:nowrap}
+.empty{padding:16px 20px;color:var(--st-ink-muted)}
+.tabs{display:flex;gap:6px}
+.tabs button{padding:4px 12px;font-size:13px;border-radius:7px}
+.tabs button[aria-selected="true"]{background:var(--st-accent);color:var(--st-accent-ink);border-color:transparent}
+@media(max-width:700px){header{padding:12px 16px}main{padding:14px 16px}#s-meta{display:none}}
+</style>
+<script defer src="/web/session.js"></script>
+</head>
+<body>
+<header><a class="back" href="/">&#8592; Monitor</a><h1 id="s-title">Session</h1><div id="s-meta"></div><button id="key" style="font-size:13px;padding:5px 11px">API key</button><button id="theme" style="font-size:13px;padding:5px 11px" aria-label="Switch color theme">Light / dark</button></header>
+<main>
+<div id="error" class="notice" role="status" hidden></div>
+<form id="auth" class="card" hidden><div class="row"><label for="api-key">API key</label><input id="api-key" type="password" autocomplete="off" placeholder="Only needed if the server has a key"><button class="primary" style="background:var(--st-accent);color:var(--st-accent-ink);border-color:transparent">Connect</button></div></form>
+<section class="card">
+<div class="label">Now</div>
+<div id="now-empty" class="empty" style="padding:6px 0 0">Nothing running or waiting for this session.</div>
+<div id="now" hidden>
+<div class="row"><span id="now-state" class="tag"></span><span id="now-snippet" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><span id="now-path" style="font:12px var(--st-font-mono);color:var(--st-ink-muted)"></span></div>
+<div class="facts" id="now-facts"></div>
+<pre id="now-output" hidden></pre>
+</div>
+</section>
+<section class="panel">
+<div class="panel-bar"><h2>Finished requests</h2><span id="finished-count" class="muted" style="font-size:13px"></span></div>
+<div id="finished-rows"></div>
+</section>
+<section class="panel" id="detail-panel" hidden>
+<div class="panel-bar"><div class="row" style="flex:1"><h2 id="detail-title" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></h2><span id="detail-state" class="tag"></span><button id="detail-close" style="padding:4px 12px;font-size:13px">Close</button></div></div>
+<div style="padding:12px 20px 0"><div class="facts" id="detail-facts"></div><div class="tabs" style="margin-top:12px"><button data-pane="output" aria-selected="true">Output</button><button data-pane="reasoning" aria-selected="false">Reasoning</button><button data-pane="input" aria-selected="false">Input</button></div></div>
+<pre id="detail-content"></pre>
+</section>
+</main>
+</body>
+</html>

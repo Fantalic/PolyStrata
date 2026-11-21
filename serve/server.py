@@ -4544,6 +4544,8 @@ class Service:
         record = {"id": pending["id"], "path": path, "model": req.get("model") or self.model,
                   "started_at": time.time(), "state": "queued", "stream": bool(req.get("stream")),
                   "snippet": pending["snippet"],
+                  "session_id": session_id, "root_session": root_session, "agent": agent,
+                  "session_name": pending["session_name"],
                   "response_format": (req.get("response_format") or {}).get("type")
                   if isinstance(req.get("response_format"), dict) else None,
                   "input": raw[:262144], "input_truncated": len(raw) > 262144,
