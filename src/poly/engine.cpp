@@ -9,9 +9,13 @@
 #include "kolibri1.hpp"
 #include "lfm2moe.hpp"
 #include "flint.hpp"
+#if !defined(STRATA_GPU_METAL)
+#include "inkling.hpp"
+#endif
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
+#include "strata/poly/inkling_kernels.hpp"
 #include "strata/poly/kernels.hpp"
 #if defined(STRATA_GPU_METAL)
 #include "strata/poly/conversation_memory.hpp"
@@ -1668,10 +1672,23 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const Shards file(o.model);
     const MetaValue* arch = file.get("general.architecture");
     const std::string name = arch ? arch->s : std::string();
+    // Inkling 2 (inkling2_loop; Unsloth's files: inkling2 with the loop in its metadata): the card's kernels loaded
+    // at once (CUDA_MODULE_LOADING=EAGER), before the expert cache takes the VRAM: loaded lazily, a kernel's code goes
+    // to VRAM at its first launch, which can then find none left.  Set before any CUDA call (the driver reads it
+    // once); a value the user set is kept.
+    const bool inkling = name == "inkling2_loop" || (name == "inkling2" && file.get("inkling2.num_loops"));
+    if (inkling && !std::getenv("CUDA_MODULE_LOADING")) {
+#if defined(_WIN32)
+        _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+#else
+        setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+#endif
+    }
     // Clover is a qwen35moe model trained to also guess a block of tokens at once (Qwen35)
     const bool qwen35 = name == "qwen35moe" || name == "clover_moe";
-    if ((o.kv_format == KvFmt::kQ8_0 || o.kv_format == KvFmt::kQ4_0) && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe")
-        throw std::runtime_error("--kv " + std::string(o.kv_format == KvFmt::kQ4_0 ? "q4_0" : "q8_0") + " is supported for qwen35moe, kolibri1, flint and lfm2moe models in v1; "
+    if ((o.kv_format == KvFmt::kQ8_0 || o.kv_format == KvFmt::kQ4_0) && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
+        !inkling)
+        throw std::runtime_error("--kv " + std::string(o.kv_format == KvFmt::kQ4_0 ? "q4_0" : "q8_0") + " is supported for qwen35moe, kolibri1, flint, lfm2moe and Inkling 2 (inkling2_loop, inkling2) models in v1; "
                                  "this is a '" + name + "' model");
     // int8 and int8k are Gemma 4's: their readers are not the arithmetic q8_0's are, so a model takes one
     // family or the other rather than a choice between them.
