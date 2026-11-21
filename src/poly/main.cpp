@@ -354,6 +354,8 @@ struct CacheFlags {
     long long idle_ms = 0;           // 0: the idle tick waits idle_s whole seconds
     long long ttl_s = 0;             // idle-age TTL: drop parked conversations not used for this many seconds
     long long ram_target_mib = 0;    // drop parked banks when free RAM is below this MiB; 0: off
+    bool disk_auto = true;           // --conversation-cache-disk-mib: unset/auto = the growth rule; a value pins it
+    bool slots_set = false;          // --conversation-cache-slots given (the auto policy leaves a set value alone)
 };
 
 struct Session {
@@ -1782,7 +1784,12 @@ int main(int argc, char** argv) {
             cache.park_auto = v == "auto";
             cache.o.park_mib = cache.park_auto ? 0 : std::atoll(v.c_str());
         }
-        else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
+        else if (a == "--conversation-cache-disk-mib") {
+            const std::string v = val();
+            cache.disk_auto = v == "auto";
+            cache.o.disk_mib = cache.disk_auto ? 0 : std::atoll(v.c_str());
+        }
+        else if (a == "--conversation-cache-slots") { cache.o.park_slots = std::atoi(val()); cache.slots_set = true; }
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
         else if (a == "--conversation-cache-pre-park-min-free-mib") cache.pre_park_floor_mib = std::atoll(val());
@@ -1897,6 +1904,14 @@ int main(int argc, char** argv) {
             else
                 std::fprintf(stderr, "strata-poly: conversation cache off: not enough free RAM to park conversations "
                                      "(--conversation-cache-mib N asks for one anyway)\n");
+        }
+        // The memory policy (2026-11): when the cache is on, at least `park_target` banks stay parkable - RAM
+        // holds what the host affords, the rest of the budget is disk (banks on their files restore in seconds
+        // instead of being wiped whole).  An explicitly given value wins over the policy's defaults.
+        if (cache.o.park_mib > 0 && want_serve) {
+            if (!cache.slots_set && cache.o.park_slots < cache.o.park_target)
+                cache.o.park_slots = cache.o.park_target;
+            if (cache.disk_auto) cache.o.disk_mib = 0;   // the growth rule raises it at the first refusal
         }
         if (cache.idle_s < 0) cache.idle_s = 0;
         if (cache.idle_ms < 0) cache.idle_ms = 0;

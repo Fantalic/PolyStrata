@@ -43,6 +43,13 @@ struct CacheOptions {
     int64_t shelf_ram_mib = 0; ///< the parked banks may hold this much heap before the oldest of them go to
                                ///< their files; 0 (the default): no bank is ever written - the shelf is RAM
                                ///< only and what does not fit is dropped at the park
+    int64_t disk_mib = 0;      ///< extra budget for banks whose rows the host refused: they are written to
+                               ///< their files instead of being dropped, so a session is never lost whole
+                               ///< (the file restore keeps the last marks; ~6 s instead of a full re-read)
+    bool disk_auto = false;    ///< auto: the cache raises disk_mib at runtime toward `park_target` parkable
+                               ///< banks, capped at disk_cap_mib; a fixed value pins it
+    int park_target = 6;       ///< the auto policy's promise: at least this many banks parkable (RAM + disk)
+    int64_t disk_cap_mib = 65536;  ///< the auto disk budget's hard ceiling
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
     std::function<bool(size_t)> pre_park_admit;  ///< the same for the idle pre-park; unset: admit rules it
     std::function<std::optional<uint64_t>()> host_available;  ///< the host's free bytes now; unset: unknown
