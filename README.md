@@ -110,6 +110,9 @@ This fork is maintained for one PC's daily use and its own experiments. The chan
 - **Crash cleanup:** parked-conversation temp files left by a dead engine (power loss, abrupt kill) are swept at
   startup by their embedded PID; a failed disk write in the opt-in spilling mode is retried on the next request
   instead of held forever.
+- **KV-resident streaming (opt-in):** a Models-tab toggle sets `--kv-resident 16384 --kv q4_0` on the model,
+  keeping the newest 16384 attention rows in VRAM and streaming the rest from RAM in 4-bit to free VRAM at
+  long contexts; the feature is PR #180 by lepotane.
 
 ## How fast is it?
 

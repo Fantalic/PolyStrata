@@ -6533,3 +6533,56 @@ class ConvCacheLogParse(unittest.TestCase):
         self.assertEqual(st["bytes"], 4588840960)
 
 
+class KvResidentHttp(unittest.TestCase):
+    """POST /config {"set": {"kv_resident": 16384, "kv": "q4_0"}} adds --kv-resident 16384 --kv q4_0;
+    null removes both, with no leftover duplicates."""
+
+    def test_kv_resident_toggle(self):
+        cfg = {"exe": "engine/strata.exe", "args": ["--pack", "data/packs/q2_0"],
+               "model_name": "test", "port": 8080, "host": "0.0.0.0", "api_key": "",
+               "sampling": {"temperature": 0.7}}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "strata-test.json"
+            path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+            tok = ByteTokenizer()
+            svc = Service(MockEngine(tok, "ok", max_context=4096), tok,
+                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+            svc.config_path = str(path)
+            httpd = serve(svc, port=0)
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            try:
+                def post(body):
+                    req = urllib.request.Request(base + "/config", method="POST",
+                                                 headers={"Content-Type": "application/json"},
+                                                 data=json.dumps(body).encode())
+                    try:
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            return r.status, json.loads(r.read())
+                    except urllib.error.HTTPError as e:
+                        with e:
+                            return e.code, json.loads(e.read())
+
+                # ON: adds --kv-resident 16384 --kv q4_0
+                status, v = post({"set": {"kv_resident": 16384, "kv": "q4_0"}})
+                self.assertEqual(status, 200)
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertIn("--kv-resident", saved["args"])
+                self.assertIn("16384", saved["args"])
+                self.assertIn("--kv", saved["args"])
+                self.assertIn("q4_0", saved["args"])
+
+                # OFF: removes both flags cleanly
+                status, v = post({"set": {"kv_resident": None, "kv": None}})
+                self.assertEqual(status, 200)
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertNotIn("--kv-resident", saved["args"])
+                self.assertNotIn("16384", saved["args"])
+                self.assertNotIn("--kv", saved["args"])
+                self.assertNotIn("q4_0", saved["args"])
+                # no leftovers: only the original args remain
+                self.assertEqual(saved["args"], ["--pack", "data/packs/q2_0"])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+

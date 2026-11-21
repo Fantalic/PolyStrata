@@ -168,3 +168,38 @@ reads only the q8_0 copy.
   quantizing a row to q4_0 loses more than q8_0 does. The token-for-token check done for the q8_0 KV-resident build
   was not repeated for q4_0.
 - More than one run per build.
+
+## The fork's own PC: RTX 3060 Ti 8 GB, 32 GB RAM (same-day comparison, 2026-11-21)
+
+**Machine:** Windows 10 Pro, AMD Ryzen 5 3600 (6 cores / 12 threads), 32 GB RAM (DDR4), NVIDIA GeForce RTX 3060 Ti 8 GB, engine built with the release recipe (CUDA 12.6, arch 86-real, portable). **Model:** Qwen3.6-35B-A3B-UD-Q3_K_M (15.9 GB, experts in host RAM), 12 engine threads, benchmark via `polystrata.py benchmark`, prompts of 21 / 2,952 / 9,986 tokens, 256 tokens out; the filled run reads a 257,903-token prompt.
+
+### Everyday prompts
+
+| Build | Context | KV | Short decode tok/s | Long-8000 decode tok/s | Prefill 8K tok/s |
+| --- | ---: | --- | ---: | ---: | ---: |
+| main build (deployed 03:58, before PR #180) | 196608 | fp16 | 64.4 | 74.7 | 1,450.3 |
+| with PR #180 | 196608 | fp16 | 74.5 | 80.4 | 1,496.1 |
+| main build | 262144 | q8_0 | 63.2 | 77.7 | 1,516.6 |
+| with PR #180 | 262144 | q8_0 | 69.7 | 91.7 | 1,567.8 |
+| with PR #180 | 262144 | q4_0 + --kv-resident 16384 | 68.2 | 75.5 | 1,471.2 |
+| with PR #180 | 393216 | q4_0 + --kv-resident 16384 | 65.7 | 75.3 | 1,497.8 |
+
+### Filled context (257,903-token prompt)
+
+| Engine | Context | KV | TTFT s | Prefill tok/s | Decode tok/s |
+| --- | --- | --- | ---: | ---: | ---: |
+| main build | 262144 | q8_0 all-resident | 260.5 | 991.1 | 39.5 |
+| with PR #180 | 262144 | q8_0 all-resident | 262.8 | 982.6 | 35.0 |
+| with PR #180 | 262144 | q4_0 + --kv-resident 16384 | 526.0 | 490.6 | 12.1 |
+
+### Reading
+
+The default paths of the two builds sit in the same-day variance band: PR #180 changes nothing a user feels without the flag (its own claim, confirmed here).
+
+`--kv-resident` costs about three times the decode speed when the context is actually full (12.1 vs 35.0–39.5 tok/s at 258K): streaming ~242,000 cold rows through PCIe every attention step dominates. The freed VRAM did not become more VRAM-resident experts on this card (engine log: about 2,880–2,980 experts in VRAM with the flag vs 2,837–3,022 without; both builds trimmed to under 330 MiB left).
+
+What the flag buys on this card: contexts the all-resident path cannot hold (384K runs; fp16 failed at 258.5K and q8_0 caps at 262K), and the small host-RAM footprint of the cold tier (~300 MB at 512K per the PR's own report).
+
+For this PC the 262K max-context mode stays all-resident q8_0; the toggle is the tool for beyond-262K runs. KV quality under q4_0 was not measured here (no perplexity run); the PR author's own quality claims stand unrepeated.
+
+The comparison build of `main` was deployed 2026-11-21 03:58 and so misses the checkpoint-ladder commit (06:26) — conversation-cache logic, immaterial to these prompts.

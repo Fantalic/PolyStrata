@@ -81,7 +81,7 @@ function showTab(name) {
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
   if (tab === "monitor") loadMcp();
-  if (tab === "models") { loadModels(); loadConfig(); loadVision(); }
+  if (tab === "models") { loadModels(); loadConfig(); loadVision(); loadKvResident(); }
   if (tab === "about") loadConfig();
   if (tab === "requests") showRequests();
   if (lastMetrics) render(lastMetrics);
@@ -1033,6 +1033,33 @@ $("vision-toggle").addEventListener("click", async () => {
     el.textContent = s.enabled ? "on" : "off";
     toast("success", `Vision ${next ? "enabled" : "disabled"}`, "The elastic encoder is now " + (next ? "running" : "stopped"), 4000);
   } catch (e) { toast("error", "Vision toggle", String(e), 6000); }
+});
+// ------------------------------------------------------------------ kv-resident toggle
+async function loadKvResident() {
+  try {
+    const r = await fetch("config", {headers: headers()});
+    if (!r.ok) return;
+    const v = await r.json();
+    const kv_resident_key = v.keys.find((k) => k.key === "kv_resident");
+    if (!kv_resident_key || kv_resident_key.value === null) { $("kv-resident-toggle").hidden = true; $("kv-resident-note").hidden = true; return; }
+    const b = $("kv-resident-toggle"), st = $("kv-resident-status"), note = $("kv-resident-note");
+    b.hidden = false;
+    st.textContent = kv_resident_key.value != null ? "on" : "off";
+    note.hidden = false;
+  } catch (e) { /* ignore; the button is still usable */ }
+}
+$("kv-resident-toggle").addEventListener("click", async () => {
+  if ($("kv-resident-toggle").disabled) return;
+  const next = $("kv-resident-status").textContent !== "on";
+  try {
+    const body = next ? {set: {kv_resident: 16384, kv: "q4_0"}} : {set: {kv_resident: null, kv: null}};
+    const r = await fetch("config", {method: "POST", headers: headers(true), body: JSON.stringify(body)});
+    if (!r.ok) { const j = await r.json(); toast("error", "KV resident toggle", (j.error || {}).message || `server answered ${r.status}`, 8000); return; }
+    const j = await r.json();
+    const st = $("kv-resident-status");
+    st.textContent = next ? "on" : "off";
+    toast("success", `KV resident ${next ? "enabled" : "disabled"}`, "Used from the next model start — use \"Save & restart model\"", 4000);
+  } catch (e) { toast("error", "KV resident toggle", String(e), 6000); }
 });
 // Save the settings, then stop and load the current model so a new context size takes effect now.
 $("cfg-restart").addEventListener("click", async () => {

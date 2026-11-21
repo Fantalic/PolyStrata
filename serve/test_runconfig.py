@@ -86,6 +86,36 @@ class Apply(unittest.TestCase):
         self.assertNotIn("api_key", got)
         self.assertNotIn("mcp_servers", got)
 
+    def test_kv_resident_toggle(self):
+        # kv_resident=16384, kv="q4_0" adds --kv-resident 16384 --kv q4_0; null removes both
+        cfg, changed = runconfig.apply(CFG, {"kv_resident": 16384, "kv": "q4_0"})
+        self.assertIn("--kv-resident", cfg["args"])
+        self.assertIn("16384", cfg["args"])
+        self.assertIn("--kv", cfg["args"])
+        self.assertIn("q4_0", cfg["args"])
+        self.assertEqual(changed, ["kv_resident", "kv"])
+        # toggle off: both null removes both flags cleanly
+        cfg2, _ = runconfig.apply(cfg, {"kv_resident": None, "kv": None})
+        self.assertNotIn("--kv-resident", cfg2["args"])
+        self.assertNotIn("16384", cfg2["args"])
+        self.assertNotIn("--kv", cfg2["args"])
+        self.assertNotIn("q4_0", cfg2["args"])
+        # no duplicates: original --kv int8 is also gone (was overwritten, now removed)
+        self.assertNotIn("int8", cfg2["args"])
+
+    def test_kv_string_must_be_one_of_the_five_values(self):
+        for bad in ("banana", "q5_0", "f16", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError, msg=f"kv={bad!r} should be rejected"):
+                    runconfig.check("kv", bad, CFG)
+
+    def test_non_kv_arg_rejects_strings(self):
+        # context, kv_resident, vram_reserve_mib must be whole numbers; a string is not accepted
+        for key in ("context", "kv_resident", "vram_reserve_mib"):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError, msg=f"{key} with string should be rejected"):
+                    runconfig.check(key, "banana", CFG)
+
 
 class Http(unittest.TestCase):
     def setUp(self):

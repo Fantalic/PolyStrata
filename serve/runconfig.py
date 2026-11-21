@@ -45,6 +45,10 @@ EDITABLE = [
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
     ("context", ("arg", "--max-context"),
      "Tokens the model's conversation can hold. Changing it takes effect when the model is switched or restarted."),
+    ("kv_resident", ("arg", "--kv-resident"),
+     "Keep the newest N attention rows in VRAM and stream the rest from RAM (0 or empty: off)"),
+    ("kv", ("arg", "--kv"),
+     "KV cache quantization when kv-resident is on (q4_0, q8_0, int8, etc.)"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 
@@ -116,6 +120,11 @@ def check(key: str, v, cfg: dict):
     if k == "num>=0":
         return _number(key, v)
     if k == "arg":
+        # the one string-valued engine option; the engine refuses anything else at start
+        if key == "kv":
+            if v not in ("fp16", "q8_0", "q4_0", "int8", "int8k"):
+                raise ValueError(f"kv: expected one of fp16, q8_0, q4_0, int8, int8k, not {v!r}")
+            return v
         return _number(key, v, whole=True)
     rule = kind[1]                                     # a sampling key: the server's own rules
     if rule == "num>=0":

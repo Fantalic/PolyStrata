@@ -109,6 +109,9 @@ caches as ggml Q8_0 blocks, 544 bytes a row instead of 1,024, the window layers'
 the default and that path is unchanged. Like Strata, strata-poly also supports `--kv-resident N` (opt-in):
 only N cells stay resident in VRAM while the rest is kept in system RAM, freeing several gigabytes of VRAM
 at long contexts (e.g. 256K on Ornith 1.5 122B) for the expert cache.
+The Models tab toggle sets it to 16384 rows with `q4_0` quantization: good when the context exceeds what
+VRAM holds all-resident (384K context runs on an 8 GB card), but a filled 262K decodes at 12.1 tok/s
+vs 35.0 tok/s all-resident on a 3060 Ti — keep the q8_0 path for the full 262K. From PR #180 by lepotane.
 
 A family's first size is the one setup takes. On a PC with less RAM than that wants it takes the second, the
 smallest, and the third is by name: `--model UD-Q4_K_M`, `--model APEX-I-QUALITY`, `--model UD-Q4_K_XL`. The
