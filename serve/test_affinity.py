@@ -156,7 +156,8 @@ class AffinityRules(unittest.TestCase):
         with self.assertRaises(ValueError):
             a.set_settings(small_toks=-1)
         a.set_settings(hold_s=30, enabled=False, small_toks=8192)
-        self.assertEqual(a.settings, {"enabled": False, "hold_s": 30.0, "small_toks": 8192, "recent_n": 4})
+        self.assertEqual(a.settings, {"enabled": False, "hold_s": 30.0, "small_toks": 8192, "hold_small": "pause",
+                                      "recent_n": 4, "wanted_default": False})
 
     def test_checkpoint_is_the_last_turn_start(self):
         ids = conv(1, 2, 3)
@@ -222,6 +223,38 @@ class AffinityOnService(unittest.TestCase):
                 break
         self.assertTrue(done, events[-4:])          # no ping first: the hold did not stop it
         self.assertEqual(self.svc.affinity.view()["waiting"], [])
+
+
+class TestViewFreeze(unittest.TestCase):
+    """view() and resume_freeze() — the freeze must not drain the countdown, and the
+    resume must restore it.  These are pure-Affinity tests (no Service, no engine)."""
+
+    def test_view_remaining_s_includes_the_frozen_pause(self):
+        """While a hold is frozen (paused_at set), view().hold.remaining_s should still
+        show the full window (~5 s), not the drained raw until-now (~4.7 after 0.3 s)."""
+        aff = Affinity(hold_s=5.0, small_toks=0)
+        aff.hold = {"until": time.monotonic() + 5.0, "prefix": [1], "bundle": "",
+                     "at": time.time(), "paused_at": None}
+        aff.hold["paused_at"] = time.monotonic()   # freeze it
+        time.sleep(0.3)
+        raw_remaining = max(0.0, aff.hold["until"] - time.monotonic())
+        view_remaining = aff.view()["hold"]["remaining_s"]
+        # raw is ~4.7, view should still be ~5.0 (frozen countdown)
+        self.assertGreater(view_remaining, raw_remaining + 0.1)
+        self.assertAlmostEqual(view_remaining, 5.0, delta=1.0)
+
+    def test_resume_freeze_resumes_the_countdown(self):
+        """After resume_freeze(), the paused_at is cleared and remaining_s starts
+        draining again.  A short until (0.5 s) should reach 0 within ~1 s."""
+        aff = Affinity(hold_s=5.0, small_toks=0)
+        aff.hold = {"until": time.monotonic() + 0.5, "prefix": [1], "bundle": "",
+                     "at": time.time(), "paused_at": None}
+        aff.hold["paused_at"] = time.monotonic()   # freeze
+        aff.resume_freeze()
+        self.assertIsNone(aff.hold["paused_at"])
+        time.sleep(1.0)                           # past the 0.5 s window
+        remaining = aff.view()["hold"]["remaining_s"]
+        self.assertEqual(remaining, 0.0)
 
 
 if __name__ == "__main__":

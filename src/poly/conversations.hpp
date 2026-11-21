@@ -23,6 +23,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,8 @@ struct CacheOptions {
     std::function<std::optional<uint64_t>()> host_available;  ///< the host's free bytes now; unset: unknown
     int64_t pre_park_floor_mib = 1024;  ///< idle pre-parking leaves this much physical RAM free; the switch's
                                         ///< park is gated by admit alone, which carries the stricter floor
+    int64_t ram_target_mib = 0;         ///< drop parked banks when free RAM is below this MiB; 0: off
+    std::function<bool(size_t)> wanted; ///< point 3 hook: whether a slot is wanted by a HINT mark; false
     FILE* log = nullptr;       ///< where parking is reported; the server reads these lines
 };
 
@@ -64,16 +67,29 @@ public:
         const int64_t n = (int64_t) ids.size();
         turn_ = -1;
         size_t best = cur_;
-        int64_t at = 0, same = 0;
+        int64_t at = 0, same = 0, share = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
             const int64_t c = common(slots_[i].seq, ids), r = reach(i, c, n);
-            if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
+            if (r > 0) {
+                if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
+            } else if (c > share) {
+                share = c;
+            }
         }
         ++clock_;
         // The pinned conversation (pin()) gets the prompt further than any kept one: the engine takes a copy of it.
         if (const int64_t far = marked(pinned_, common(pinned_.seq, ids), n); far > at) return from_pinned(far);
         if (at == 0) {
             // nothing kept starts like this
+            if (share > 0 && o_.log) {
+                // The prompt starts like a kept bank but diverges below the first kept mark, so nothing can be
+                // salvaged and the read starts over.  The line makes the rewrite - and its size - visible.
+                const std::string note = pending_session_.empty() ? "" : " (session " + pending_session_ + ")";
+                std::fprintf(o_.log,
+                             "strata-poly: conversation cache: prompt shares %lld tokens with a kept bank but no kept"
+                             " checkpoint at or below the divergence; re-reading from scratch%s\n",
+                             (long long) share, note.c_str());
+            }
             if (!cur().seq.empty() && park(slots_.size())) cur_ = take(cur_);
             slots_[cur_] = Slot{};
             e_.reset();
@@ -133,7 +149,7 @@ public:
         for (const Checkpoint& m : cur().marks) after_.push_back(m.pos);
         for (const int64_t p : due) {
             after_.push_back(p);
-            while (after_.size() > (size_t) o_.checkpoints) after_.erase(after_.begin() + (std::ptrdiff_t) drop_of(after_));
+            if (after_.size() > (size_t) o_.checkpoints) after_ = ladder_of(after_, o_.checkpoints);
         }
         for (const int64_t p : due) {
             const bool stays = std::find(after_.begin(), after_.end(), p) != after_.end();
@@ -198,6 +214,7 @@ public:
         s.seq = std::move(seq);
         s.prompt = len(s);
         s.stamp = ++clock_;
+        s.used = Clock::now();  // adopted banks must age like resumed ones, else drop_stale skips them forever
     }
 
     // A session file's part of the conversation in the engine, to come back to in another run of the engine
@@ -276,10 +293,14 @@ public:
             e_.load_rows(buf.get(), first, m, first, m);
         }
         e_.load_state(in.marks.back().state->data(), n);
-        while (!in.marks.empty() && in.marks.size() > (size_t) std::max(o_.checkpoints, 0)) {
+        if (in.marks.size() > (size_t) std::max(o_.checkpoints, 0)) {
             std::vector<int64_t> pos;
             for (const Checkpoint& m : in.marks) pos.push_back(m.pos);
-            in.marks.erase(in.marks.begin() + (std::ptrdiff_t) drop_of(pos));
+            const auto keep = ladder_of(pos, std::max(o_.checkpoints, 0));
+            std::vector<Checkpoint> kept;
+            for (const Checkpoint& m : in.marks)
+                if (std::binary_search(keep.begin(), keep.end(), m.pos)) kept.push_back(m);
+            in.marks = std::move(kept);
         }
         in.prompt = (int64_t) head.prompt;
         in.stamp = ++clock_;
@@ -360,7 +381,7 @@ public:
         }
         if (moved && o_.log)
             std::fprintf(o_.log, "conversation cache: relieved %zu banks to their files for the heap cap; "
-                                 "parked=%d bytes=%lld heap=%lld MiB\n", moved, parked(),
+                                 "parked=%zu bytes=%lld heap=%lld MiB\n", moved, parked(),
                                  (long long) parked_bytes(), (long long) (spill_heap_bytes() >> 20));
     }
 
@@ -393,7 +414,8 @@ public:
         if (o_.park_mib < 1 || o_.park_slots < 1 || s.marks.empty() || s.marks.back().pos < o_.park_min) return false;
         const Clock::time_point t0 = Clock::now();
         const int64_t end = s.marks.back().pos, from = saved(s);
-        if (from == end) return true;  // nothing to do, no logging
+        if (from == end) return false;  // everything is already banked: no work this call,
+                                        // so the idle tick's loop falls through to the queue wait
         // One idle tick copies at most a quarter of the budget, and only what the host can spare above the
         // smaller pre-park floor.  A delta bigger than the host's free RAM is refused whole and retried whole
         // every tick - the parked copy never advances, and a later switch destroys the engine's copy wholesale
@@ -412,6 +434,7 @@ public:
 
     // Test hook: set the `used` time of a parked slot to age it past the TTL.
     void set_slot_used(size_t i, std::chrono::steady_clock::time_point tp) { slots_[i].used = tp; }
+    std::chrono::steady_clock::time_point used_at(size_t i) const { return slots_[i].used; }  // test hook: read a slot's used stamp
 
     // Drops the parked conversations the client has not used for `ttl_s` seconds — a session that ended long ago
     // left behind.  Runs in the idle tick, so nothing is waiting: a drop is free and a session that returns
@@ -425,6 +448,7 @@ public:
             Slot& s = slots_[i];
             if (i == cur_ || s.seq.empty() || s.used == Clock::time_point{}) continue;
             if (ms_since(s.used) < (double) ttl_s * 1000.0) continue;
+            if (slot_wanted(i)) continue;   // the session is queued/wanted: its bank stays
             tokens += len(s);
             s = Slot{};
             ++n;
@@ -438,6 +462,49 @@ public:
                          (long long) (spill_heap_bytes() >> 20));
         }
         return n;
+    }
+
+    /// Drops every parked bank except the current conversation's — the UI clear button's
+    /// DROP line.  The pinned conversation (system prompt) is out of scope: it is not in the
+    /// slots at all.  Returns how many were dropped.
+    size_t drop_all() {
+        size_t n = 0;
+        int64_t tokens = 0;
+        for (size_t i = 0; i < slots_.size(); ++i) {
+            Slot& s = slots_[i];
+            if (i == cur_ || s.seq.empty()) continue;
+            tokens += len(s);
+            s = Slot{};
+            ++n;
+        }
+        if (n && o_.log) {
+            const Held h = held(cur_);
+            std::fprintf(o_.log,
+                         "strata-poly: conversation cache: dropped %zu parked banks for the clear (%lld tokens); parked=%zu bytes=%zu evictions=%zu heap=%lld MiB\n",
+                         n, (long long) tokens, h.count, h.bytes, evictions_,
+                         (long long) (spill_heap_bytes() >> 20));
+        }
+        return n;
+    }
+
+    /// Drops parked banks until free host RAM >= ram_target_mib MiB (fork feature,
+    /// defined in conversations_ram.hpp).
+    size_t drop_for_ram();
+
+    /// Set the server's SESSION <id> tag before a GEN request (fork feature).
+    void set_pending_session(const std::string& id);
+    /// Tag the current slot and drop superseded banks of the same session (fork feature).
+    void tag_session();
+    /// Drop parked banks tagged `id` (fork feature).
+    size_t drop_superseded(const std::string& id);
+    /// Keep session_tags_ in sync with slots_ (fork feature).
+    void sync_tags();
+    /// Set the server's wanted sessions set (fork feature).
+    void set_wanted_sessions(const std::set<std::string>& ids) { wanted_sessions_ = ids; }
+    /// A slot is protected when its session tag is in the wanted set (fork feature).
+    bool slot_wanted(size_t i) const {
+        return i < session_tags_.size() && !session_tags_[i].empty()
+            && wanted_sessions_.count(session_tags_[i]) != 0;
     }
 
 private:
@@ -582,24 +649,50 @@ private:
         const BlobPtr b = blob(e_.state_bytes());
         if (!b) return nullptr;
         s.marks.push_back({at, b});
-        while (s.marks.size() > (size_t) o_.checkpoints) {
+        if (s.marks.size() > (size_t) o_.checkpoints) {
             std::vector<int64_t> pos;
             for (const Checkpoint& m : s.marks) pos.push_back(m.pos);
-            s.marks.erase(s.marks.begin() + (std::ptrdiff_t) drop_of(pos));
+            const auto keep = ladder_of(pos, o_.checkpoints);
+            std::vector<Checkpoint> kept;
+            for (const Checkpoint& m : s.marks)
+                if (std::binary_search(keep.begin(), keep.end(), m.pos)) kept.push_back(m);
+            s.marks = std::move(kept);
         }
         return b;
     }
 
-    // Of more checkpoints than are kept, the one that goes: the one whose neighbours are closest together.  The
-    // last two stay, the end of this prompt and of the one before being where a client most often comes back to.
-    static size_t drop_of(const std::vector<int64_t>& pos) {
-        size_t drop = 0;
-        int64_t gap = INT64_MAX;
-        for (size_t k = 0; k + 2 < pos.size(); ++k) {
-            const int64_t g = pos[k + 1] - (k ? pos[k - 1] : 0);
-            if (g < gap) gap = g, drop = k;
+    // Which checkpoints to keep when there are more than `budget`.  The ladder: the first mark (the head
+    // anchor - the client's context rewrites tend to sit early, e.g. a compaction fold), the last two (this
+    // prompt's end and where its last turn begins, where a client most often comes back to), and between them
+    // a chain where each kept mark is the largest one within thrice the last one kept.  A prompt diverging at
+    // D then finds a kept mark worth at least a third of D below it, so resume() can salvage the common prefix
+    // instead of parking the bank and re-reading everything from the first token.  The chain is recomputed from
+    // the marks at hand at each trim, and the head pair stays stable under that drift, which a geometric rung
+    // schedule does not.
+    static std::vector<int64_t> ladder_of(const std::vector<int64_t>& pos, int64_t budget) {
+        if (budget < 1) return {};
+        const size_t n = pos.size();
+        if (n <= (size_t) budget) return pos;
+        std::vector<int64_t> keep;
+        if (budget >= 3) {
+            keep.push_back(pos.front());
+            const size_t cap = n - 2;   // the last two stay for the turn and the end
+            size_t k = 0;               // the last kept mark's index
+            while (keep.size() + 2 < (size_t) budget && k + 1 < cap) {
+                size_t j = k;
+                while (j + 1 < cap && pos[j + 1] <= 3 * keep.back()) ++j;   // the largest within thrice
+                if (j == k) ++j;                                           // none: the next mark up, at any ratio
+                k = j;
+                keep.push_back(pos[k]);
+            }
         }
-        return drop;
+        if (budget >= 2) {
+            keep.push_back(pos[n - 2]);
+            keep.push_back(pos[n - 1]);
+        } else {
+            keep.push_back(pos[n - 1]);
+        }
+        return keep;
     }
 
     static void cut(Slot& s, int64_t at) {
@@ -650,8 +743,9 @@ private:
     // read again), among equals the one not used for longest.  A conversation the client was in within
     // the last `focus` requests keeps its place while any other candidate exists.  The newest parked
     // one never goes (a stale RAM reading must not wipe what just parked).  `keep` is a slot the
-    // caller is about to reuse and is spared.  False: every candidate is protected.
-    bool pick_victim(size_t keep, size_t& out) {
+    // caller is about to reuse and is spared.  `skip` are indices the caller asked to exclude;
+    // False: every candidate is protected.
+    bool pick_victim(size_t keep, size_t& out, const std::vector<size_t>& skip = {}) {
         out = slots_.size();
         size_t newest = 0;
         for (size_t i = 0; i < slots_.size(); ++i)
@@ -661,6 +755,8 @@ private:
             for (size_t i = 0; i < slots_.size(); ++i) {
                 const Slot& s = slots_[i];
                 if (i == cur_ || i == keep || s.seq.empty() || s.stamp == newest) continue;
+                if (!skip.empty() && std::find(skip.begin(), skip.end(), i) != skip.end()) continue;
+                if (slot_wanted(i)) continue;   // the session is queued/wanted: its bank stays
                 if (pass == 0 && o_.focus > 0 && clock_ - s.stamp <= (uint64_t) o_.focus) continue;
                 if (out == slots_.size() || bank_bytes(i) < bank_bytes(out) ||
                     (bank_bytes(i) == bank_bytes(out) && s.stamp < slots_[out].stamp))
@@ -822,6 +918,9 @@ private:
     E& e_;
     CacheOptions o_;
     std::vector<Slot> slots_;   // the current conversation and the parked ones
+    std::vector<std::string> session_tags_;   // fork feature: per-slot session tag (conversations_ram.hpp)
+    std::string pending_session_;             // fork feature: the server's SESSION line (conversations_ram.hpp)
+    std::set<std::string> wanted_sessions_;   // fork feature: sessions whose banks the TTL/eviction must skip (conversations_ram.hpp)
     Slot pinned_;               // pin()'s: beside them, never the engine's own, never pushed out
     size_t cur_ = 0;
     uint64_t clock_ = 0;

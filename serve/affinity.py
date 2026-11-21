@@ -103,15 +103,16 @@ def first_user_snippet(req: dict, chars: int = 60) -> str:
 class Entry:
     """One waiting request, as the admission sees it (also what GET /api/queue shows)."""
     __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "ids", "plen", "deferred", "reason",
-                 "session_name", "bundle", "session_id", "root_session", "agent")
+                 "session_name", "bundle", "session_id", "root_session", "agent", "wanted")
 
     def __init__(self, id: str, ids: list, path: str, snippet: str, session_name: str = "",
-                 session_id: str = "", root_session: str = "", agent: str = ""):
+                 session_id: str = "", root_session: str = "", agent: str = "", wanted: bool = False):
         self.id, self.ids, self.path, self.snippet = id, ids, path, snippet
         self.session_name = session_name
         # the session bundle (plugin headers): every request of one root session - the main agent's
         # session and its sub-agent spawns - shares the root id and counts as one conversation
         self.session_id, self.root_session, self.agent = session_id, root_session, agent
+        self.wanted = bool(wanted)                  # fork feature: the keep toggle protects this bank
         self.bundle = root_session or session_id
         self.arrived, self.arrived_mono = time.time(), time.monotonic()
         self.plen = len(ids)
@@ -133,6 +134,7 @@ class Entry:
         return {"id": self.id, "path": self.path, "snippet": self.snippet, "arrived": self.arrived,
                 "session_name": self.session_name,
                 "session_id": self.session_id, "root_session": self.root_session, "agent": self.agent,
+                "wanted": self.wanted,
                 "prompt_tokens": self.plen, "small": self.small(affinity.settings["small_toks"]),
                 "state": state, "waited_s": round(time.monotonic() - self.arrived_mono, 1)}
 
@@ -145,7 +147,7 @@ class Affinity:
         self.lock = threading.Lock()
         self.settings = {"enabled": bool(enabled), "hold_s": float(hold_s),
                          "small_toks": int(small_toks), "hold_small": str(hold_small).strip().lower(),
-                         "recent_n": int(recent_n)}
+                         "recent_n": int(recent_n), "wanted_default": False}
         self.turn_id = turn_id
         self.waiting: dict[str, Entry] = {}         # insertion order = arrival order
         self.recent: deque = deque(maxlen=max(1, int(recent_n)))   # served conversations' checkpoints
@@ -176,7 +178,8 @@ class Affinity:
         if not ids:
             return None
         entry = Entry(id or uuid.uuid4().hex[:12], ids, path or "", snippet or "", session_name=session_name,
-                      session_id=session_id, root_session=root_session, agent=agent)
+                      session_id=session_id, root_session=root_session, agent=agent,
+                      wanted=bool(self.settings.get("wanted_default", False)))
         with self.lock:
             self.waiting[entry.id] = entry
         return entry
@@ -186,6 +189,18 @@ class Affinity:
             return
         with self.lock:
             self.waiting.pop(id, None)
+
+    def wanted_sessions(self) -> list:
+        """Session ids of queued entries flagged wanted (the queue-panel keep toggle): their
+        parked banks are protected from the engine's TTL and RAM-pressure eviction."""
+        with self.lock:
+            return [e.session_id for e in self.waiting.values() if e.wanted and e.session_id]
+
+    def set_wanted(self, id: str, wanted: bool = False) -> None:
+        """The queue row's keep toggle: protects this request's session's parked bank from the
+        engine's TTL and RAM-pressure eviction while the request waits."""
+        with self.lock:
+            self.waiting[id].wanted = bool(wanted)
 
     # ---- admission ----------------------------------------------------
     def decide(self, entry: Entry) -> bool:
@@ -278,6 +293,16 @@ class Affinity:
             else:
                 self.hold = None                    # expired (or nothing armed): no gap to bridge
 
+    def resume_freeze(self) -> None:
+        """The request that froze the hold's countdown (hold_small pause) died before serving:
+        the busy time is over, the countdown resumes.  served() does this on the normal path;
+        a request that fails mid-flight never reaches it."""
+        with self.lock:
+            if self.hold is not None and self.hold.get("paused_at") is not None:
+                now = time.monotonic()
+                self.hold["until"] += now - self.hold["paused_at"]
+                self.hold["paused_at"] = None
+
     # ---- the monitor page's controls ----------------------------------
     def focus(self, id: str) -> dict:
         with self.lock:
@@ -310,7 +335,7 @@ class Affinity:
             self.paused = False
 
     def set_settings(self, enabled: bool = None, hold_s: float = None, small_toks: int = None, hold_small: str = None,
-                     recent_n: int = None) -> dict:
+                     recent_n: int = None, wanted_default: bool = None) -> dict:
         with self.lock:
             if enabled is not None:
                 if not isinstance(enabled, bool):
@@ -338,6 +363,10 @@ class Affinity:
                     raise ValueError("recent_n: 1 to 16")
                 self.settings["recent_n"] = recent_n
                 self.recent = deque(self.recent, maxlen=recent_n)
+            if wanted_default is not None:
+                if not isinstance(wanted_default, bool):
+                    raise ValueError("wanted_default: true or false")
+                self.settings["wanted_default"] = wanted_default
             return dict(self.settings)
 
     # ---- the queue view ------------------------------------------------
@@ -345,7 +374,7 @@ class Affinity:
         with self.lock:
             waiting = [e.public(self) for e in self.waiting.values()]
             hold = None if self.hold is None else {
-                "remaining_s": round(max(0.0, self.hold["until"] - time.monotonic()), 1),
+                "remaining_s": round(self._hold_left(), 1),
                 "snippet": "", "at": self.hold["at"]}
             focused = None if self.focused is None else dict(self.focused)
             return {"settings": dict(self.settings), "waiting": waiting, "hold": hold,

@@ -6,6 +6,7 @@
 // The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, GENI for a prompt with pictures,
 // STOP and QUIT in, and RESUME, PP, T, DONE and ERR out.
 #include "conversations.hpp"
+#include "conversations_ram.hpp"
 #include "engine.hpp"
 #include "guesses.hpp"
 #include "spill.hpp"
@@ -30,6 +31,8 @@
 #include <iostream>
 #include <mutex>
 #include <random>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -350,6 +353,7 @@ struct CacheFlags {
     int idle_s = 5;                  // seconds of engine idle before the cache work happens; 0: never
     long long idle_ms = 0;           // 0: the idle tick waits idle_s whole seconds
     long long ttl_s = 0;             // idle-age TTL: drop parked conversations not used for this many seconds
+    long long ram_target_mib = 0;    // drop parked banks when free RAM is below this MiB; 0: off
 };
 
 struct Session {
@@ -390,6 +394,7 @@ struct Session {
             return strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes, floor);
         };
         o.host_available = [] { return strata::core::available_host_bytes(); };
+        o.ram_target_mib = f.ram_target_mib;
         return o;
     }
 
@@ -416,6 +421,10 @@ struct Session {
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
         engine.images(pictures.at.data(), (int) pictures.at.size());
         r.resume = kept.resume(ids);
+        // Fork feature: tag the slot with the server's SESSION id and drop superseded banks
+        // (conversations_ram.hpp). The tag_session() method handles both tagging and the
+        // drop of same-session parked banks that this request did not enter.
+        kept.tag_session();
         if (const size_t freed = engine.trim_kv(n)) {
             const int had = engine.cached_experts();
             engine.mind_vram();
@@ -1078,6 +1087,7 @@ int serve(Session& ss) {
             bool have = false;
             if (wait <= 0) {
                 ss.kept.drop_stale(ss.flags.ttl_s);
+                ss.kept.drop_for_ram();
                 // Bank a small chunk at a time while no request waits: the loop peeks between chunks, so
                 // a request that arrives interrupts within one small chunk and the rest stays for the
                 // next idle moment.  pre_park() is false when everything is saved (or the host has no
@@ -1088,6 +1098,7 @@ int serve(Session& ss) {
             }
             if (!have && !(wait > 0 && lines.pop_until(line, wait))) {
                 ss.kept.drop_stale(ss.flags.ttl_s);
+                ss.kept.drop_for_ram();
                 while (!(have = lines.try_pop(line)) && ss.kept.pre_park()) {}
                 ss.kept.relieve();
                 idle_t0 = Clock::now();
@@ -1106,7 +1117,8 @@ int serve(Session& ss) {
         if (line.rfind("BYIELD", 0) == 0) continue;
         lines.stop.store(false);   // a STOP that came between requests is stale
         // BGEN <slot> <max_new> ... reads the prompt and picks its first token as GEN 1 does, then the request goes
-        // on in that slot (BADM <slot> 1), or ends there (BADM <slot> 0)
+        // on in that slot (BADM <slot> 1), or ends there (BADM <slot> 0).
+        // Untagged for this feature: batch slots are not part of session tagging.
         admit = -1;
         gives_to = -1;
         long long admit_max = 0;
@@ -1176,6 +1188,26 @@ int serve(Session& ss) {
             std::fflush(stdout);
             continue;
         }
+        // SESSION <id>, the server's per-request session tag: the slot the request lands in
+        // gets it, and the session's superseded parked banks are dropped (conversations_ram.hpp)
+        if (line.rfind("SESSION ", 0) == 0) {
+            ss.kept.set_pending_session(line.substr(8));
+            std::fflush(stdout);
+            continue;
+        }
+        // WANTED <id>..., the server's protected sessions: their parked banks are skipped by
+        // the TTL (drop_stale) and the RAM-pressure eviction. A bare WANTED clears the set.
+        if (line == "WANTED" || line.rfind("WANTED ", 0) == 0) {
+            std::set<std::string> wanted;
+            if (line.size() > 6) {
+                std::istringstream rest(line.substr(7));
+                std::string id;
+                while (rest >> id) wanted.insert(id);
+            }
+            ss.kept.set_wanted_sessions(wanted);
+            std::fflush(stdout);
+            continue;
+        }
         // PARK, the server's POST /v1/cache/park: the idle cache work now, with the numbers as the reply
         if (line.rfind("PARK", 0) == 0 && (line.size() == 4 || line[4] == ' ')) {
             if (writing()) {
@@ -1187,6 +1219,22 @@ int serve(Session& ss) {
             const bool ok = ss.kept.pre_park();
             std::printf("PARK ok=%d parked=%zu bytes=%zu ms=%.1f\n", ok ? 1 : 0, ss.kept.parked(),
                         ss.kept.parked_bytes(), ms_since(t0));
+            std::fflush(stdout);
+            continue;
+        }
+        // DROP, the server's POST /v1/cache/drop: every parked bank except the current
+        // conversation's, gone — with the numbers as the reply
+        if (line.rfind("DROP", 0) == 0 && line.size() == 4) {
+            if (writing()) {
+                std::printf("ERR DROP: not while batch slots are writing\n");
+                std::fflush(stdout);
+                continue;
+            }
+            const Clock::time_point t0 = Clock::now();
+            const size_t before = ss.kept.parked_bytes();
+            const size_t n = ss.kept.drop_all();
+            std::printf("DROP ok=1 dropped=%zu bytes=%zu ms=%.1f\n", n, before - ss.kept.parked_bytes(),
+                        ms_since(t0));
             std::fflush(stdout);
             continue;
         }
@@ -1742,6 +1790,7 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-idle-ms") cache.idle_ms = std::atoll(val());
         else if (a == "--conversation-cache-focus") cache.o.focus = std::atoi(val());
         else if (a == "--conversation-cache-ttl-s") cache.ttl_s = std::atoll(val());
+        else if (a == "--conversation-cache-ram-target-mib") cache.ram_target_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());
@@ -1789,7 +1838,8 @@ int main(int argc, char** argv) {
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
-        cache.min_free_mib > most || cache.pre_park_floor_mib < 0 || cache.pre_park_floor_mib > most) {
+        cache.min_free_mib > most || cache.pre_park_floor_mib < 0 || cache.pre_park_floor_mib > most ||
+        cache.ram_target_mib < 0 || cache.ram_target_mib > most) {
         std::fprintf(stderr, "strata-poly: a cache option is negative or too large\n");
         return 2;
     }
@@ -1850,6 +1900,7 @@ int main(int argc, char** argv) {
         }
         if (cache.idle_s < 0) cache.idle_s = 0;
         if (cache.idle_ms < 0) cache.idle_ms = 0;
+        if (cache.ram_target_mib < 0) cache.ram_target_mib = 0;
         // The server asks for 250 ms — a small chunk banks in every idle moment.
         // The writes that move a parked bank from RAM to its file wait for a quiet engine, and the quiet the
         // server asks for (--conversation-cache-idle-s, 1 s - that one also paces the idle tick's own copying,

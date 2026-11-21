@@ -658,7 +658,24 @@ def schema_to_grammar(schema: Any) -> str:
     return _format(c._rules)
 
 def json_object_grammar() -> str:
-    return schema_to_grammar({"type": "object"})
+    """One JSON object with at least one member.
+
+    The bare ``{"type": "object"}`` grammar also matches ``{}``, and at temperature 0 the model
+    then emits exactly that (measured on the live server: a 3-token ``{}``).  A structuring call
+    that asked for content gets nothing.  Requiring one member makes ``{}`` unreachable.
+    """
+    c = _Compiler({"type": "object"})
+    # The same primitives schema_to_grammar() would ensure for an object schema.
+    c._ensure_prim("value")
+    for prim in ("object", "array", "string", "number", "integer", "boolean", "null"):
+        c._ensure_prim(prim)
+    c._ensure_prim("char")
+    c._ensure_prim("ws")
+    c._ensure_prim("int_part")
+    c._ensure_prim("dec_part")
+    # A required first member, then the same optional comma-member tail: "{}" cannot derive.
+    c._add_rule("root", '"{" ws string ":" ws value ("," ws string ":" ws value)* ws "}"')
+    return _format(c._rules)
 def _format(rules: Dict[str, str]) -> str:
     # `root` FIRST: rule 0 is the grammar root (llama.cpp convention — our
     # parser starts the stack set at m_rules[0]).

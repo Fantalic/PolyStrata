@@ -682,9 +682,9 @@ void long_read() {
     }
     far = 0;
     check(left[0] == left[1], "a read past its checkpoints keeps the ones a read to each of them keeps");
-    const std::vector<int64_t> six = {0,     0,     0,     8192,  8192,  8192,  8192, 16384,
-                                      16384, 16384, 22528, 22528, 22528, 28672, 30720};
-    check(left[1] == six, "which are five of the fifteen inside, beside the one before the prompt's last token");
+    const std::vector<int64_t> six = {2048, 2048, 6144,  6144,  6144,  6144, 6144,
+                                      6144, 18432, 18432, 18432, 18432, 18432, 28672, 30720};
+    check(left[1] == six, "which are the ladder's five inside marks, beside the one before the prompt's last token");
 }
 
 // What is kept leaves the heap for a temporary file after a release, and reads back the same, before and after its

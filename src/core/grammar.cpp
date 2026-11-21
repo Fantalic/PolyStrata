@@ -918,44 +918,52 @@ const std::vector<unsigned long long>& Grammar::allowed_mask() {
 
 // ── accept ────────────────────────────────────────────────────────────────
 
-void Grammar::accept(int token_id) {
-    if (m_terminal) return;
+bool Grammar::accept(int token_id) {
+    if (m_terminal) return true;
 
-    // Check if token was actually allowed.
+    // Check if token was actually allowed (the mask is a superset pre-check:
+    // every token the full walk would accept has its first byte allowed, so a
+    // cleared bit here can safely mean reject).
     auto& mask = const_cast<std::vector<unsigned long long>&>(allowed_mask());
     bool allowed = false;
     if (token_id >= 0 && token_id < m_vocab_size)
         allowed = (mask[token_id / 64] >> (token_id % 64)) & 1ULL;
-    if (!allowed) return; // no-op when token not in mask.
+    if (!allowed) return false;
 
     // EOG → terminal.
     for (int eid : m_eog_ids)
-        if (eid == token_id) { m_terminal = true; m_mask_valid = false; return; }
+        if (eid == token_id) { m_terminal = true; m_mask_valid = false; return true; }
 
     const std::string& tok = m_tokens[token_id];
-    if (tok.empty()) return;
+    if (tok.empty()) return true;
 
-    // Advance all stacks byte-by-byte.  Each byte walks from the state the
-    // previous byte committed (m_stacks), so multi-byte tokens consume
-    // byte-by-byte against the evolving grammar state.  advance_stack passes
-    // completed (empty) stacks through unchanged, so accepting paths survive
-    // inside a multi-byte token.
+    // Advance a COPY of the stacks byte-by-byte and commit only when the
+    // token's WHOLE text is consumed.  Committing per byte and returning
+    // mid-token would leave the earlier bytes applied and the rest silently
+    // dropped: a `""` pick at a one-quote position consumed one quote and
+    // corrupted the emitted text (the grammar advanced one char, the output
+    // carried two).  advance_stack passes completed (empty) stacks through
+    // unchanged, so accepting paths survive inside a multi-byte token.
+    std::vector<Stack> next = m_stacks;
     std::vector<Stack> new_stacks;
     for (size_t byte_idx = 0; byte_idx < tok.size(); byte_idx++) {
         uint8_t byte = static_cast<uint8_t>(tok[byte_idx]);
         new_stacks.clear();
-        for (const auto& stk : m_stacks) {
+        for (const auto& stk : next) {
             advance_stack(stk, byte, new_stacks);
         }
         std::sort(new_stacks.begin(), new_stacks.end());
         new_stacks.erase(std::unique(new_stacks.begin(), new_stacks.end()), new_stacks.end());
 
         if (new_stacks.empty()) {
-            m_mask_valid = false;
-            return; // state unchanged.
+            // No stack survives this byte: reject the WHOLE token.  The state
+            // is untouched, so the mask stays valid — the caller bans the id
+            // and re-samples without a mask recompute.
+            return false;
         }
-        m_stacks = std::move(new_stacks);
+        next = std::move(new_stacks);
     }
+    m_stacks = std::move(next);
 
     // Update m_partial_value / m_n_remain (token ending mid-UTF-8 sets carry).
     uint8_t first = static_cast<uint8_t>(tok[0]);
@@ -971,6 +979,7 @@ void Grammar::accept(int token_id) {
     }
 
     m_mask_valid = false;
+    return true;
 }
 
 // ── accepting ─────────────────────────────────────────────────────────────

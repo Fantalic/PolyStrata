@@ -335,6 +335,10 @@ class MockEngine:
         """MockEngine: the park reply the StrataEngine would write to its stdout."""
         return {"ok": 1, "parked": 1, "bytes": 81234, "ms": 12.3}
 
+    def drop(self, timeout: float = 120.0) -> dict:
+        """MockEngine: the drop reply the StrataEngine would write to its stdout."""
+        return {"ok": 1, "dropped": 2, "bytes": 162468, "ms": 3.4}
+
 
 class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
@@ -698,7 +702,9 @@ class ConvCacheLog:
     which is the log): read on from where it was last read, from the start of the engine's current run."""
     EVENT = re.compile(r"conversation cache: (parked|skipped|restored) (\d+) tokens.*?parked=(\d+) bytes=(\d+)"
                        r"(?: evictions=(\d+))?")
-    DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+)")
+    DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+) bytes=(\d+)")
+    CLEAR = re.compile(r"conversation cache: dropped \d+ parked banks for the clear \(\d+ tokens\); "
+                       r"parked=(\d+) bytes=(\d+)")
     READ_MAX = 1 << 20                                  # at most the last MiB of new lines per read
 
     def __init__(self):
@@ -744,8 +750,12 @@ class ConvCacheLog:
                     st["last_event"], st["last_tokens"], st["last_at"] = m.group(1), int(m.group(2)), now
                 continue
             m = self.DROPPED.search(line)
-            if m:
-                self.state["parked"] = int(m.group(1))
+            if m:                                           # a superseded bank's drop: the shelf shrinks
+                self.state["parked"], self.state["bytes"] = int(m.group(1)), int(m.group(2))
+                continue
+            m = self.CLEAR.search(line)
+            if m:                                           # the Clear-parked button's drop: same, counts stay
+                self.state["parked"], self.state["bytes"] = int(m.group(1)), int(m.group(2))
         return dict(self.state)
 
 
@@ -975,7 +985,11 @@ class StrataEngine:
         # it runs (INFO batch_slots=N: it may have fewer than asked, or none, when they do not fit)
         asked = next((int(args[args.index(k) + 1]) for k in ("--batch", "--slots") if k in args), 0)
         self.batch = int(self.info.get("batch_slots") or 0)
-        self.grammar = int(self.info.get("grammar") or 0)
+        # The engine's INFO line advertises grammar-constrained decoding (1) or not (absent/0).
+        # Anything else the engine prints there is treated as "not available" rather than
+        # crashing the server at startup.
+        _g = self.info.get("grammar")
+        self.grammar = 1 if _g == 1 or _g == "1" else 0
         if asked and self.batch != asked:
             print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
                   "(its log says why)", flush=True)
@@ -1022,6 +1036,8 @@ class StrataEngine:
         self._ctl_erred = False                         # #1059: the control lines ended on an ERR
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
         self.wlock = threading.Lock()                   # stdin writes from several request threads
+        self.pending_session = ""                       # session id for the next prompt write (set_session)
+        self.pending_wanted = []                        # session ids for the next prompt write's WANTED line (set_wanted)
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
 
@@ -1248,6 +1264,45 @@ class StrataEngine:
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the PARK command")
 
+    def drop(self, timeout: float = 120.0) -> dict:
+        """`DROP` between requests (the caller holds the service's FIFO): every parked bank except the
+        current conversation's leaves the process.  -> the engine's figures (dropped, bytes, ms); raises
+        ValueError with the engine's reason, EngineDied when it ended."""
+        if not self.alive():
+            raise EngineDied("the engine is not running")
+        self.proc.stdin.write("DROP\n")
+        self.proc.stdin.flush()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                line = self.lines.get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                raise EngineDied("the engine did not answer the DROP command") from None
+            if line is None:
+                raise EngineDied("the engine ended")
+            line = line.strip()
+            if line.startswith("ERR"):
+                raise ValueError(line[4:].strip() or "the engine refused the DROP command")
+            if line.startswith("DROP "):
+                out = {}
+                for kv in line.split()[1:]:
+                    k, _, v = kv.partition("=")
+                    out[k] = int(v) if v.lstrip("-").isdigit() else v
+                return out
+            if time.time() > deadline:
+                raise EngineDied("the engine did not answer the DROP command")
+
+    def set_session(self, session_id: str) -> None:
+        """The request's session id (the affinity registry's): the next prompt write sends
+        `SESSION <id>` so the engine tags the conversation slot. Consumed and cleared by
+        that write; an empty id sends nothing."""
+        self.pending_session = session_id or ""
+
+    def set_wanted(self, session_ids: list) -> None:
+        """Sessions whose parked banks are protected from the engine's TTL/eviction (the
+        queue-panel keep toggle). Sent with the next prompt write, like SESSION; consumed
+        and cleared there. An empty list clears the engine's set."""
+        self.pending_wanted = [s for s in (session_ids or []) if s]
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -2056,6 +2111,14 @@ class StrataEngine:
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         keys = self.sampling_keys(sampling or {}) + self.turn_key(ids)
         head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
+        pw = getattr(self, "pending_wanted", [])
+        if pw:
+            self.proc.stdin.write("WANTED " + " ".join(pw) + "\n")
+            self.pending_wanted = []
+        ps = getattr(self, "pending_session", "")
+        if ps:
+            self.proc.stdin.write(f"SESSION {ps}\n")
+            self.pending_session = ""
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
@@ -4191,6 +4254,7 @@ class Service:
 
     vram_wait_s = 300.0                                  # #533: how long POST /v1/vram waits for a running request
     park_wait_s = 300.0                         # how long POST /v1/cache/park waits for a running request
+    drop_wait_s = 300.0                         # how long POST /v1/cache/drop waits for a running request
 
     def vram(self, reserve_mib: int | None) -> dict:
         """#533, POST /v1/vram: keep `reserve_mib` of VRAM free for other programs (None: the reserve the engine
@@ -4240,6 +4304,28 @@ class Service:
                 return {"status": "not loaded", "note": "nothing to park"}
             out = self.engine.park()
             return {"status": "parked", **out}
+        finally:
+            if ctl is not None:
+                ctl.release()
+            self.fifo.release()
+
+    def drop(self) -> dict:
+        """POST /v1/cache/drop: every parked conversation bank except the current one's leaves the
+        process, between requests - a request that is running finishes first (up to drop_wait_s).
+        -> {"status": ... and the engine's figures}."""
+        if not hasattr(self.engine, "drop"):
+            raise ValueError("this engine cannot drop its parked conversation banks")
+        if not self.fifo.acquire(timeout=self.drop_wait_s):
+            raise ModelBusy("a request is still running; try again when it has finished")
+        ctl = getattr(self.engine, "ctl", None) if getattr(self.engine, "batch", 0) else None
+        if ctl is not None and not ctl.acquire(timeout=self.drop_wait_s):
+            self.fifo.release()
+            raise ModelBusy("a request is still running; try again when it has finished")
+        try:
+            if not self.loaded():
+                return {"status": "not loaded", "note": "nothing to clear"}
+            out = self.engine.drop()
+            return {"status": "dropped", **out}
         finally:
             if ctl is not None:
                 ctl.release()
@@ -5042,16 +5128,23 @@ class Service:
 
     def _release_turn(self, entry):
         """The turn is over (ExitStack at `with turn:`'s end): the request leaves the admission
-        registry, then the FIFO goes to the next request (which re-decides with the fresh state)."""
-        self.affinity.unregister(entry.id if entry else None)
-        self.fifo.release()
+        registry, then the FIFO goes to the next request (which re-decides with the fresh state).
+        The FIFO release must not depend on the unregister succeeding."""
+        try:
+            self.affinity.unregister(entry.id if entry else None)
+        finally:
+            self.fifo.release()
 
     def _served_turn(self, ids, entry=None):
         """The request's prompt ran on the engine (still holding the FIFO): the admission remembers
         the conversation and arms the hold when no continuation is already waiting.  `entry` is the
         request's own admission entry: served() runs before _release_turn (ExitStack LIFO), so the
-        entry is still registered and must not count as its own follower."""
-        self.affinity.served(ids, entry)
+        entry is still registered and must not count as its own follower.  A served() failure must
+        not stop the unwind: the FIFO release below it depends on it."""
+        try:
+            self.affinity.served(ids, entry)
+        except Exception as e:
+            print(f"[strata] affinity: served() failed, the turn state may be stale: {e!r}", flush=True)
 
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
@@ -5149,6 +5242,10 @@ class Service:
         entry = None
         if not par:
             pending = getattr(self.request_trace, "pending", None) or {}
+            if hasattr(self.engine, "set_session"):
+                self.engine.set_session(pending.get("session_id") or "")
+            if hasattr(self.engine, "set_wanted"):
+                self.engine.set_wanted(self.affinity.wanted_sessions())
             entry = self.affinity.register(pending.get("id"), ids, pending.get("path", ""),
                                            pending.get("snippet", ""), pending.get("session_name", ""),
                                            pending.get("session_id", ""), pending.get("root_session", ""),
@@ -5171,26 +5268,34 @@ class Service:
                 # while a continuation of the hot conversation waits (or the hold waits for it) - it re-checks every
                 # second and keeps the keep-alives flowing.
                 got = False
+                held = False                      # the FIFO is ours and the turn callback has not taken it
                 try:
                     while not got:
                         was = entry.deferred if entry else False
                         got = self.fifo.acquire(timeout=QUEUE_BEAT_S)
+                        if got:
+                            held = True
                         if got and entry is not None and not self.affinity.decide(entry):
+                            self.fifo.release()          # the admission says: someone else goes first
+                            held = False
+                            got = False
                             if not was:              # one line per wait episode, not every re-check
                                 print(f"[strata] affinity: request {entry.id} waits ({entry.reason}) - "
                                       f"{entry.plen} tokens, {entry.snippet[:60]!r}", flush=True)
-                            self.fifo.release()          # the admission says: someone else goes first
-                            got = False
                             time.sleep(AFFINITY_RECHECK_S)   # re-decide about once a second, not in a spin
                         if got:
                             turn.callback(self._release_turn, entry)
+                            held = False              # the ExitStack owns the release now
                         elif cancel.is_set():
                             break
                         else:
                             yield "ping", None
-                except BaseException:                    # the consumer closed us at a ping: no longer queued
+                except BaseException:                # the consumer closed us at a ping: no longer queued
+                    if held:
+                        self.fifo.release()          # acquired but the turn never took it: give it back
                     with self.status_lock:
                         self.status["queued"] -= 1
+                    self.affinity.resume_freeze()
                     self.affinity.unregister(entry.id if entry else None)
                     raise
                 if not got:                              # cancelled while queued
@@ -6515,7 +6620,8 @@ def make_handler(svc: Service):
                     try:
                         if path == "/api/queue/settings":
                             svc.affinity.set_settings(**{k: req[k] for k in
-                                                         ("enabled", "hold_s", "small_toks", "recent_n")
+                                                         ("enabled", "hold_s", "small_toks", "recent_n",
+                                                          "wanted_default")
                                                          if k in req})
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/focus":
@@ -6540,6 +6646,9 @@ def make_handler(svc: Service):
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/unpause-request":
                             svc.affinity.unpause_request(req.get("id"))
+                            self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/wanted":
+                            svc.affinity.set_wanted(req.get("id"), bool(req.get("wanted")))
                             self._json(200, svc.affinity.view())
                         else:
                             self._json(404, {"error": {"message": "not found"}})
@@ -6613,6 +6722,14 @@ def make_handler(svc: Service):
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
+                if path == "/v1/cache/drop":                 # the parked conversation banks, cleared
+                    if not self._own_page("the conversation cache can be cleared"):
+                        return
+                    try:
+                        self._json(200, svc.drop())
+                    except EngineDied as e:
+                        self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                    return
 
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
                     self.record = svc.begin_request(path, req, self.headers)
@@ -6648,7 +6765,8 @@ def make_handler(svc: Service):
                 self._json(503, responses_error_body(str(e), "server_error") if path == "/v1/responses"
                            else {"error": {"type": "server_error", "message": str(e)}})
             except ValueError as e:
-                print(f"[strata] 400 invalid request: {e}", flush=True)
+                import traceback
+                print(f"[strata] 400 invalid request: {e}\n{traceback.format_exc()}", flush=True)
                 if path == "/v1/responses":
                     self._json(400, responses_error_body(str(e)))
                 else:
