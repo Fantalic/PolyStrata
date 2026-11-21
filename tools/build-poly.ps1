@@ -11,7 +11,7 @@
 #
 # Switches:
 #   -Configure   Reconfigure the CMake cache with the exact release flags, then
-#                build and deploy (useful after a branch switch or cache stale).
+#                build and deploy under MSVC vcvars with STRATA_ENABLE_CUDA=ON (useful after a branch switch or cache stale).
 #   -Tests       Also build the four offline conversation/spill tests:
 #                glm_conversations_test, spill_test, conversation_memory_test,
 #                poly_guesses_test.
@@ -56,7 +56,7 @@ if ($Ninja -and -not (Test-Path $Ninja)) {
 # -Configure: reconfigure the CMake cache with the release recipe flags.
 if ($Configure) {
     $TestFlag = if ($Tests) { '-DSTRATA_BUILD_CONVERSATION_TESTS=ON' } else { '' }
-    $cmd = "$Cmake -G Ninja -DCMAKE_MAKE_PROGRAM=`"$Ninja`" -S `"$Repo`" -B `"$BuildDir`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86-real -DCMAKE_CUDA_COMPILER=`"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe`" -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR=`"$Repo\third_party\llama.cpp`" -DSTRATA_BUILD_TESTS=OFF $TestFlag"
+    $cmd = "cmd /c `"`"$Vcvars`" >nul && `"$Cmake`" -G Ninja -DCMAKE_MAKE_PROGRAM=`"$Ninja`" -S `"$Repo`" -B `"$BuildDir`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86-real -DCMAKE_CUDA_COMPILER=`"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe`" -DSTRATA_ENABLE_CUDA=ON -DSTRATA_PORTABLE=ON -DSTRATA_GGML_DIR=`"$Repo\third_party\llama.cpp`" -DSTRATA_BUILD_TESTS=OFF $TestFlag`""
     Write-Host 'Configuring:' $cmd
     Invoke-With-Exit { cmd.exe /s /c $cmd }
 }
