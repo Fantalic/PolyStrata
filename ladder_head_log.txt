@@ -1,0 +1,3 @@
+strata-poly: conversation cache: prompt shares 1000 tokens with a kept bank but no kept checkpoint at or below the divergence; re-reading from scratch (session S9)
+strata-poly: conversation cache: parked 60999 tokens in 0.2 ms; parked=1 bytes=976056 evictions=0 heap=0 MiB
+strata-poly: conversation cache: dropped 1 superseded banks of session S9 (60999 tokens); parked=0 bytes=0 evictions=0 heap=0 MiB

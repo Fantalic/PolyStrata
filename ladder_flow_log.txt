@@ -1,0 +1,4 @@
+strata-poly: conversation cache: parked 60999 tokens in 0.2 ms; parked=1 bytes=976056 evictions=0 heap=0 MiB
+strata-poly: conversation cache: dropped 1 superseded banks of session S5 (60999 tokens); parked=1 bytes=976008 evictions=0 heap=0 MiB
+strata-poly: conversation cache: parked 40299 tokens in 0.1 ms; parked=1 bytes=1325928 evictions=0 heap=1 MiB
+strata-poly: conversation cache: dropped 1 superseded banks of session S5 (40299 tokens); parked=1 bytes=1325920 evictions=0 heap=1 MiB
