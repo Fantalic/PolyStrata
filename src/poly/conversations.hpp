@@ -67,16 +67,29 @@ public:
         const int64_t n = (int64_t) ids.size();
         turn_ = -1;
         size_t best = cur_;
-        int64_t at = 0, same = 0;
+        int64_t at = 0, same = 0, share = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
             const int64_t c = common(slots_[i].seq, ids), r = reach(i, c, n);
-            if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
+            if (r > 0) {
+                if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
+            } else if (c > share) {
+                share = c;
+            }
         }
         ++clock_;
         // The pinned conversation (pin()) gets the prompt further than any kept one: the engine takes a copy of it.
         if (const int64_t far = marked(pinned_, common(pinned_.seq, ids), n); far > at) return from_pinned(far);
         if (at == 0) {
             // nothing kept starts like this
+            if (share > 0 && o_.log) {
+                // The prompt starts like a kept bank but diverges below the first kept mark, so nothing can be
+                // salvaged and the read starts over.  The line makes the rewrite - and its size - visible.
+                const std::string note = pending_session_.empty() ? "" : " (session " + pending_session_ + ")";
+                std::fprintf(o_.log,
+                             "strata-poly: conversation cache: prompt shares %lld tokens with a kept bank but no kept"
+                             " checkpoint at or below the divergence; re-reading from scratch%s\n",
+                             (long long) share, note.c_str());
+            }
             if (!cur().seq.empty() && park(slots_.size())) cur_ = take(cur_);
             slots_[cur_] = Slot{};
             e_.reset();
@@ -136,7 +149,7 @@ public:
         for (const Checkpoint& m : cur().marks) after_.push_back(m.pos);
         for (const int64_t p : due) {
             after_.push_back(p);
-            while (after_.size() > (size_t) o_.checkpoints) after_.erase(after_.begin() + (std::ptrdiff_t) drop_of(after_));
+            if (after_.size() > (size_t) o_.checkpoints) after_ = ladder_of(after_, o_.checkpoints);
         }
         for (const int64_t p : due) {
             const bool stays = std::find(after_.begin(), after_.end(), p) != after_.end();
@@ -280,10 +293,14 @@ public:
             e_.load_rows(buf.get(), first, m, first, m);
         }
         e_.load_state(in.marks.back().state->data(), n);
-        while (!in.marks.empty() && in.marks.size() > (size_t) std::max(o_.checkpoints, 0)) {
+        if (in.marks.size() > (size_t) std::max(o_.checkpoints, 0)) {
             std::vector<int64_t> pos;
             for (const Checkpoint& m : in.marks) pos.push_back(m.pos);
-            in.marks.erase(in.marks.begin() + (std::ptrdiff_t) drop_of(pos));
+            const auto keep = ladder_of(pos, std::max(o_.checkpoints, 0));
+            std::vector<Checkpoint> kept;
+            for (const Checkpoint& m : in.marks)
+                if (std::binary_search(keep.begin(), keep.end(), m.pos)) kept.push_back(m);
+            in.marks = std::move(kept);
         }
         in.prompt = (int64_t) head.prompt;
         in.stamp = ++clock_;
@@ -364,7 +381,7 @@ public:
         }
         if (moved && o_.log)
             std::fprintf(o_.log, "conversation cache: relieved %zu banks to their files for the heap cap; "
-                                 "parked=%d bytes=%lld heap=%lld MiB\n", moved, parked(),
+                                 "parked=%zu bytes=%lld heap=%lld MiB\n", moved, parked(),
                                  (long long) parked_bytes(), (long long) (spill_heap_bytes() >> 20));
     }
 
@@ -632,24 +649,50 @@ private:
         const BlobPtr b = blob(e_.state_bytes());
         if (!b) return nullptr;
         s.marks.push_back({at, b});
-        while (s.marks.size() > (size_t) o_.checkpoints) {
+        if (s.marks.size() > (size_t) o_.checkpoints) {
             std::vector<int64_t> pos;
             for (const Checkpoint& m : s.marks) pos.push_back(m.pos);
-            s.marks.erase(s.marks.begin() + (std::ptrdiff_t) drop_of(pos));
+            const auto keep = ladder_of(pos, o_.checkpoints);
+            std::vector<Checkpoint> kept;
+            for (const Checkpoint& m : s.marks)
+                if (std::binary_search(keep.begin(), keep.end(), m.pos)) kept.push_back(m);
+            s.marks = std::move(kept);
         }
         return b;
     }
 
-    // Of more checkpoints than are kept, the one that goes: the one whose neighbours are closest together.  The
-    // last two stay, the end of this prompt and of the one before being where a client most often comes back to.
-    static size_t drop_of(const std::vector<int64_t>& pos) {
-        size_t drop = 0;
-        int64_t gap = INT64_MAX;
-        for (size_t k = 0; k + 2 < pos.size(); ++k) {
-            const int64_t g = pos[k + 1] - (k ? pos[k - 1] : 0);
-            if (g < gap) gap = g, drop = k;
+    // Which checkpoints to keep when there are more than `budget`.  The ladder: the first mark (the head
+    // anchor - the client's context rewrites tend to sit early, e.g. a compaction fold), the last two (this
+    // prompt's end and where its last turn begins, where a client most often comes back to), and between them
+    // a chain where each kept mark is the largest one within thrice the last one kept.  A prompt diverging at
+    // D then finds a kept mark worth at least a third of D below it, so resume() can salvage the common prefix
+    // instead of parking the bank and re-reading everything from the first token.  The chain is recomputed from
+    // the marks at hand at each trim, and the head pair stays stable under that drift, which a geometric rung
+    // schedule does not.
+    static std::vector<int64_t> ladder_of(const std::vector<int64_t>& pos, int64_t budget) {
+        if (budget < 1) return {};
+        const size_t n = pos.size();
+        if (n <= (size_t) budget) return pos;
+        std::vector<int64_t> keep;
+        if (budget >= 3) {
+            keep.push_back(pos.front());
+            const size_t cap = n - 2;   // the last two stay for the turn and the end
+            size_t k = 0;               // the last kept mark's index
+            while (keep.size() + 2 < (size_t) budget && k + 1 < cap) {
+                size_t j = k;
+                while (j + 1 < cap && pos[j + 1] <= 3 * keep.back()) ++j;   // the largest within thrice
+                if (j == k) ++j;                                           // none: the next mark up, at any ratio
+                k = j;
+                keep.push_back(pos[k]);
+            }
         }
-        return drop;
+        if (budget >= 2) {
+            keep.push_back(pos[n - 2]);
+            keep.push_back(pos[n - 1]);
+        } else {
+            keep.push_back(pos[n - 1]);
+        }
+        return keep;
     }
 
     static void cut(Slot& s, int64_t at) {
