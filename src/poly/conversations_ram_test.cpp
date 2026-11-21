@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <set>
+#include <string>
 
 using strata::poly::CacheOptions;
 using strata::poly::Conversations;
@@ -71,6 +73,7 @@ struct Chat {
     explicit Chat(const CacheOptions& o) : kept(e, o) {}
     int64_t ask(std::vector<int32_t>& ids, int reply = 3, int64_t turn = -1) {
         const int64_t n = (int64_t)ids.size(), from = kept.resume(ids);
+        kept.tag_session();   // the engine tags the entered slot per request and drops the session's superseded banks
         kept.turn_at(turn);
         check(from >= 0 && from < n && e.at == from, "a prompt is taken up before its last token");
         for (int64_t i = from; i < n;) {
@@ -362,6 +365,72 @@ void drop_all_log_line() {
     }
 }
 
+// wanted_sessions_ survives TTL expiry: session S's bank stays when wanted,
+// is dropped once the wanted set is cleared.
+void wanted_survives_ttl() {
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park a conversation from session S
+    std::vector<int32_t> a = text(1, 3000), b = text(2, 3000);
+    c.ask(a);
+    c.kept.set_pending_session("S");
+    c.kept.tag_session();
+    c.ask(b);
+    check(c.kept.parked() == 1, "a is parked from session S");
+
+    // Age the parked slot past the TTL
+    auto old_time = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    c.kept.set_slot_used(0, old_time);
+
+    // With S wanted: the bank survives drop_stale
+    c.kept.set_wanted_sessions({"S"});
+    check(c.kept.drop_stale(60) == 0, "wanted session S's bank survives TTL expiry");
+    check(c.kept.parked() == 1, "parked unchanged after drop_stale (wanted)");
+
+    // Clear the wanted set: now the bank gets dropped
+    c.kept.set_wanted_sessions({});
+    check(c.kept.drop_stale(60) == 1, "bank dropped once wanted set cleared");
+    check(c.kept.parked() == 0, "parked == 0 after drop_stale (unwanted)");
+}
+
+// wanted_sessions_ survives eviction: only the unwanted session's bank is evicted.
+void wanted_survives_eviction() {
+    uint64_t free0 = (uint64_t(2) << 20) - 4096;
+    CacheOptions o = options(64, 3);
+    o.park_min = 0;
+    o.ram_target_mib = 2;
+    RamModel ram; ram.free0 = free0; ram.initial_parked = 2;
+    o.host_available = [&ram] { return ram(); };
+    Chat c(o);
+    ram.kept = &c.kept;
+
+    // Park two conversations: a (slot 0) and b (slot 1)
+    std::vector<int32_t> a = text(1, 3000), b = text(2, 3000);
+    c.ask(a);
+    c.ask(b);
+    check(c.kept.parked() == 1, "a is parked");
+
+    // Tag slot 0 (a) as session S, slot 1 (b) as session other
+    c.kept.set_pending_session("S");
+    c.kept.tag_session();
+    c.kept.set_pending_session("other");
+    c.kept.tag_session();
+
+    // Set S as wanted: only S's bank should be protected
+    c.kept.set_wanted_sessions({"S"});
+
+    // Now park c2 (slot 2, current): all 3 slots used
+    std::vector<int32_t> c2 = text(3, 3000);
+    c.ask(c2);
+    check(c.kept.parked() == 2, "a and b are parked, c2 current");
+
+    // Force eviction: drop_for_ram should evict b (not wanted), spare a (wanted)
+    check(c.kept.drop_for_ram() == 1, "one bank evicted (the unwanted one)");
+    check(c.kept.parked() == 1, "only b evicted: a (S) still parked");
+}
+
 // drop_all(): only the current conversation is spared.
 void drop_all_cur_spared() {
     CacheOptions o = options(64, 2);
@@ -386,6 +455,259 @@ void drop_all_cur_spared() {
     check(c.ask(cont2) > 0, "c2 (current) survived drop_all - its follow-up reuses");
 }
 
+// Fork feature: session tags and rewrite-drop.
+// The server sends "SESSION <id>" before each GEN request. The slot the request lands in
+// gets the tag. When a tagged session's request lands, parked banks with the same tag that
+// the request did not enter (the client's context compaction rewrote the prompt) are dropped.
+
+void rewrite_drop_basic() {
+    // Session S parks a conversation, then a tagged request with a fully divergent prompt
+    // arrives → the old S bank is dropped (superseded by the rewrite).
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park A, B, C in slots 0, 1, 2
+    std::vector<int32_t> a = text(1, 1000), b = text(2, 1000), c2 = text(3, 1000);
+    c.ask(a);
+    c.ask(b);
+    c.ask(c2);
+    check(c.kept.parked() == 2, "A and B are parked, C is current");
+
+    // Session S: tag slot 2 (C's conversation) as belonging to session S
+    c.kept.set_pending_session("S");
+    c.kept.tag_session();
+    check(c.kept.parked() == 2, "tagging does not change parked count");
+
+    // Session S's next turn: a fully divergent prompt (0 common tokens)
+    // This should park the old S bank (slot 2) and create a fresh slot.
+    // tag_session() then drops the old S bank (parked, tagged S, not entered by this request).
+    std::vector<int32_t> divergent = text(99, 1000);  // tokens 99xxx: no overlap
+    c.kept.set_pending_session("S");
+    c.ask(divergent);
+    // ask(): C's slot parks (parked=3), then the ask's tag_session() drops the S-tagged bank (parked=2).
+    check(c.kept.parked() == 2, "the old S bank (C's) was dropped (superseded)");
+    // A and B's banks still exist.
+    check(c.ask(a) > 0, "A resumes from its checkpoint");
+    check(c.ask(b) > 0, "B resumes from its checkpoint");
+}
+
+void current_bank_survives() {
+    // Session S's conversation is CURRENT (not parked). Next turn arrives tagged S.
+    // Nothing is dropped: the entered slot is cur_ (protected by the drop_superseded guard).
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park A in slot 0, B in slot 1
+    std::vector<int32_t> a = text(1, 1000), b = text(2, 1000);
+    c.ask(a);
+    c.ask(b);
+    check(c.kept.parked() == 1, "A is parked");
+
+    // Session S: B is current, tag it
+    c.kept.set_pending_session("S");
+    c.kept.tag_session();
+    check(c.kept.parked() == 1, "tagging current slot does not drop it");
+
+    // Session S's next turn: a divergent prompt. B's slot parks in the switch and is tagged S,
+    // so the ask's tag_session() drops it (the rewrite supersedes S's previous bank). What
+    // survives parked is A's bank.
+    std::vector<int32_t> divergent = text(99, 1000);
+    c.kept.set_pending_session("S");
+    c.ask(divergent);
+    check(c.kept.parked() == 1, "after the rewrite-drop, A's bank survives (parked=1)");
+    check(c.ask(a) > 0, "A resumes from its checkpoint");
+}
+
+void different_session_bank_survives() {
+    // A's bank parked with tag A; a request tagged S (S != A) arrives -> A's bank survives.
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    Chat c(o);
+
+    std::vector<int32_t> a = text(1, 1000), a_cont = text(1, 1200), b = text(2, 1000);
+    c.ask(a);
+    c.kept.set_pending_session("A");   // tags A's slot while it is current
+    c.ask(a_cont);
+    c.ask(b);                          // parks A; the parked slot keeps its tag
+    check(c.kept.parked() == 1, "A is parked, B is current");
+
+    c.kept.set_pending_session("S");   // a different session
+    std::vector<int32_t> divergent = text(99, 1000);
+    c.ask(divergent);
+    check(c.kept.parked() == 2, "the different-session banks survive (nothing was dropped)");
+    check(c.ask(a_cont) > 0, "A's bank survived the S request (it resumes)");
+}
+
+void untagged_flow_unchanged() {
+    // No SESSION line → no drops, no tags. Legacy pile-up behavior intact.
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park A, B, C
+    std::vector<int32_t> a = text(1, 1000), b = text(2, 1000), c2 = text(3, 1000);
+    c.ask(a);
+    c.ask(b);
+    c.ask(c2);
+    check(c.kept.parked() == 2, "A and B are parked, C is current");
+
+    // No set_pending_session, no tag_session: legacy flow
+    std::vector<int32_t> divergent = text(99, 1000);
+    c.ask(divergent);
+    // All four banks exist (pile-up continues):
+    check(c.kept.parked() == 3, "untagged: no drops (A, B, C parked, the new one current)");
+}
+
+// wanted_is_session_scoped: no wanted set → nothing protected, the bank is dropped.
+void wanted_is_session_scoped() {
+    CacheOptions o = options(64, 4);
+    o.park_min = 0;
+    Chat c(o);
+
+    // Park a conversation
+    std::vector<int32_t> a = text(1, 3000), b = text(2, 3000);
+    c.ask(a);
+    c.kept.set_pending_session("S");
+    c.kept.tag_session();
+    c.ask(b);
+    check(c.kept.parked() == 1, "a is parked from session S");
+
+    // Age the parked slot past the TTL
+    auto old_time = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    c.kept.set_slot_used(0, old_time);
+
+    // No wanted set: the bank should be dropped by TTL
+    c.kept.set_wanted_sessions({});
+    check(c.kept.drop_stale(60) == 1, "bank dropped when no wanted set");
+    check(c.kept.parked() == 0, "parked == 0 after drop_stale (control)");
+}
+
+// The checkpoint ladder: with more checkpoints than are kept, the kept marks spread over the prompt, so a
+// mid-prompt rewrite still finds a rung at or below the divergence and the bank is salvaged instead of parked
+// and re-read whole.
+
+// The whole log file as one string, for the tests that watch the cache's report lines.
+std::string log_text(const char* path) {
+    std::string s;
+    std::FILE* f = std::fopen(path, "rb");
+    if (f) {
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+        std::fclose(f);
+    }
+    return s;
+}
+
+// With checkpoints=10 (the server's --prompt-cache 10), a 61000-token conversation holds rungs on the
+// geometric ladder: a probe that diverges at D comes back at a rung worth at least a third of D.  With the
+// old bunch-at-tail eviction every probe below the last two checkpoints came back at 0.
+void ladder_rungs_probed() {
+    const std::vector<int32_t> p1 = text(1, 61000);
+    const int64_t ds[] = {3000, 5000, 9000, 16384, 24576, 40000, 55000};
+    for (const int64_t d : ds) {
+        CacheOptions o = options(64, 4);
+        o.checkpoints = 10;
+        Chat c(o);
+        std::vector<int32_t> ids = p1;
+        c.ask(ids);
+        std::vector<int32_t> probe(ids.begin(), ids.begin() + d);
+        probe = probe + text(20, 300);
+        const int64_t from = c.ask(probe);
+        check(from > 0 && from >= d / 3, "a mid-prompt divergence comes back at a ladder rung");
+    }
+}
+
+// The parked shape: the bank sits parked when the rewrite arrives, so the salvage has to bring it back
+// into the engine (the rows and the state, bit for bit) and go on from the rung.
+void parked_bank_salvage() {
+    CacheOptions o = options(64, 4);
+    o.checkpoints = 10;
+    Chat c(o);
+    std::vector<int32_t> ids = text(1, 61000);
+    c.ask(ids);
+    std::vector<int32_t> other = text(9, 500);
+    other[0] = ids[0] == 49999 ? 0 : ids[0] + 1;   // starts unlike: the long bank parks, nothing salvageable yet
+    c.ask(other);
+    check(c.kept.parked() == 1, "the long bank is parked");
+    std::vector<int32_t> probe(ids.begin(), ids.begin() + 40000);
+    probe = probe + text(21, 300);
+    const int64_t from = c.ask(probe);
+    check(from > 0 && from >= 40000 / 3, "a parked bank is salvaged from a mid-prompt divergence");
+}
+
+// The rewrite flow that emptied the cache: a session's full-context prompt, then rewrites that diverge
+// mid-prompt.  Each turn must salvage the session's bank from a rung; a turn that parks and re-reads
+// whole is the old behaviour - the bank was dropped as superseded and the next turn started from 0.
+void rewrite_flow_salvages() {
+    CacheOptions o = options(64, 4);
+    o.checkpoints = 10;
+    o.log = std::fopen("ladder_flow_log.txt", "w");
+    Chat c(o);
+    const std::vector<int32_t> ctx = text(1, 61000);
+    std::vector<int32_t> t1 = ctx;
+    c.kept.set_pending_session("S5");
+    c.ask(t1);
+    // Turn 2: the same context with a rewritten tail, shorter than the first prompt.
+    std::vector<int32_t> t2(ctx.begin(), ctx.begin() + 40000);
+    t2 = t2 + text(30, 300);
+    c.kept.set_pending_session("S5");
+    const int64_t from2 = c.ask(t2);
+    check(from2 > 0 && from2 >= 40000 / 3, "the rewrite comes back at a rung of the first turn's bank");
+    // Turn 3: another rewrite - the fork of turn 2 copied the rungs at or below its entry point.
+    std::vector<int32_t> t3(ctx.begin(), ctx.begin() + 40000);
+    t3 = t3 + text(31, 350);
+    c.kept.set_pending_session("S5");
+    const int64_t from3 = c.ask(t3);
+    check(from3 > 0 && from3 >= 40000 / 3, "the next rewrite still comes back at a rung (the fork kept the ladder)");
+    if (o.log) { std::fflush(o.log); std::fclose(o.log); }
+    const std::string log = log_text("ladder_flow_log.txt");
+    // Salvageable turns must not print the scratch diagnostic: that line is for turns that give up.
+    check(log.find("re-reading from scratch") == std::string::npos, "salvageable turns say nothing about re-reading from scratch");
+}
+
+// A rewrite that makes the prompt shorter: the salvage point is capped by the new prompt's length, and the
+// salvaged conversation goes on from its own end afterwards.
+void shrink_salvages() {
+    CacheOptions o = options(64, 4);
+    o.checkpoints = 10;
+    Chat c(o);
+    std::vector<int32_t> ids = text(1, 61000);
+    c.ask(ids);
+    std::vector<int32_t> p2(ids.begin(), ids.begin() + 8192);
+    p2 = p2 + text(40, 100);
+    const int64_t from = c.ask(p2);
+    check(from > 0 && from >= 8192 / 3, "a shorter rewrite still salvages the common prefix");
+    const size_t len2 = p2.size();
+    p2 = p2 + text(41, 50);
+    const int64_t again = c.ask(p2);
+    check(again == (int64_t) len2, "the salvaged conversation goes on from its own end");
+}
+
+// A divergence below the first rung cannot be salvaged: the bank is parked, re-read from scratch and dropped
+// as superseded - the old silent behaviour.  The diagnostic line now says so, with the session id.
+void head_divergence_says_so() {
+    CacheOptions o = options(64, 4);
+    o.checkpoints = 10;
+    o.log = std::fopen("ladder_head_log.txt", "w");
+    Chat c(o);
+    std::vector<int32_t> ids = text(1, 61000);
+    c.kept.set_pending_session("S9");
+    c.ask(ids);
+    std::vector<int32_t> p2(ids.begin(), ids.begin() + 1000);   // below every rung the ladder keeps
+    p2 = p2 + text(42, 200);
+    c.kept.set_pending_session("S9");
+    const int64_t from = c.ask(p2);
+    check(from == 0, "a divergence below the first rung cannot be salvaged");
+    if (o.log) { std::fflush(o.log); std::fclose(o.log); }
+    const std::string log = log_text("ladder_head_log.txt");
+    check(log.find("prompt shares 1000 tokens with a kept bank") != std::string::npos, "the scratch diagnostic names the shared prefix");
+    check(log.find("(session S9)") != std::string::npos, "the scratch diagnostic names the session");
+    check(log.find("dropped 1 superseded banks of session S9") != std::string::npos, "the unsalvageable bank is still dropped as superseded");
+}
+
 }  // namespace
 
 int main() {
@@ -399,6 +721,18 @@ int main() {
     drop_all_three_parked();
     drop_all_log_line();
     drop_all_cur_spared();
+    rewrite_drop_basic();
+    current_bank_survives();
+    different_session_bank_survives();
+    untagged_flow_unchanged();
+    wanted_survives_ttl();
+    wanted_survives_eviction();
+    wanted_is_session_scoped();
+    ladder_rungs_probed();
+    parked_bank_salvage();
+    rewrite_flow_salvages();
+    shrink_salvages();
+    head_divergence_says_so();
     std::printf("conversations_ram_test: %d checks passed\n", checks);
     return 0;
 }

@@ -119,7 +119,9 @@ function renderQueue(q) {
   const open = !$("queue-body").hidden;
   $("aff-on").checked = !!q.settings.enabled;
   if (document.activeElement !== $("hold-s")) $("hold-s").value = q.settings.hold_s;
+  $("keep-def").checked = !!q.settings.wanted_default;
   $("aff-apply").disabled = !open;
+  $("cc-clear").disabled = !open;
   $("skip-wait").disabled = !open || !(q.hold || q.focused);
   const state = [];
   if (q.focused) state.push(`Focused: ${q.focused.snippet || q.focused.id} (waits without timeout for its follow-up)`);
@@ -127,7 +129,7 @@ function renderQueue(q) {
   if (!q.settings.enabled) state.push("Affinity is off: requests take the turn in arrival order.");
   text("queue-state", state.join("  ·  "));
   const rows = $("queue-rows");
-  const next = JSON.stringify([q.waiting.map(w => w.id), q.focused?.id]);
+  const next = JSON.stringify([q.waiting.map(w => [w.id, w.wanted ? 1 : 0]), q.focused?.id]);
   if (rows.dataset.stamp === next) return;
   rows.dataset.stamp = next;
   rows.replaceChildren();
@@ -157,6 +159,12 @@ function renderQueue(q) {
       act.textContent = "Focus"; act.onclick = async () => { try { await api("/api/queue/focus", {id: w.id}); await refresh(); } catch (e) { notice(e.message); } };
     }
     row.append(act);
+    // keep: protects this session's parked bank from the engine's TTL and RAM-pressure eviction
+    const keep = document.createElement("button");
+    keep.textContent = w.wanted ? "Kept" : "Keep";
+    keep.disabled = !open;
+    keep.onclick = async () => { try { await api("/api/queue/wanted", {id: w.id, wanted: !w.wanted}); await refresh(); } catch (e) { notice(e.message); } };
+    row.append(keep);
     rows.append(row);
   }
   // drag-and-drop delegation on the tbody
@@ -216,8 +224,11 @@ async function control(load) {
 }
 $("load").onclick = () => control(true); $("unload").onclick = () => control(false);
 $("queue-toggle").onclick = () => { const hidden = !$("queue-body").hidden; $("queue-body").hidden = hidden; $("queue-toggle").textContent = hidden ? "Show" : "Hide"; $("aff-apply").disabled = hidden; if (!hidden) refresh(); };
-$("aff-apply").onclick = async () => { try { await api("/api/queue/settings", {enabled: $("aff-on").checked, hold_s: Number($("hold-s").value)}); notice(""); await refresh(); } catch (e) { notice(e.message); } };
+$("aff-apply").onclick = async () => { try { await api("/api/queue/settings", {enabled: $("aff-on").checked, hold_s: Number($("hold-s").value), wanted_default: $("keep-def").checked}); notice(""); await refresh(); } catch (e) { notice(e.message); } };
 $("skip-wait").onclick = async () => { try { await api("/api/queue/skip", {}); await refresh(); } catch (e) { notice(e.message); } };
+// clear-parked: the main page's #cc-clear does the same POST; the engine frees every parked bank
+// except the running conversation and answers with its figures ({"status":"dropped",dropped,bytes})
+$("cc-clear").onclick = async () => { try { const d = await api("/v1/cache/drop", {}); text("cc-clear-note", d.status === "dropped" ? `Cleared ${d.dropped} bank${d.dropped === 1 ? "" : "s"} (${(d.bytes / 1073741824).toFixed(1)} GiB)` : (d.note || d.status || "nothing parked")); } catch (e) { notice(e.message); } };
 $("key").onclick = () => { $("auth").hidden = !$("auth").hidden; if (!$("auth").hidden) $("api-key").focus(); };
 $("auth").onsubmit = async event => { event.preventDefault(); apiKey = $("api-key").value.trim(); sessionStorage.setItem("strata.monitor.key", apiKey); $("auth").hidden = true; await refresh(); };
 $("theme").onclick = () => { const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = theme; localStorage.setItem("strata.theme", theme); };

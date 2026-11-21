@@ -156,7 +156,8 @@ class AffinityRules(unittest.TestCase):
         with self.assertRaises(ValueError):
             a.set_settings(small_toks=-1)
         a.set_settings(hold_s=30, enabled=False, small_toks=8192)
-        self.assertEqual(a.settings, {"enabled": False, "hold_s": 30.0, "small_toks": 8192, "hold_small": "pause", "recent_n": 4})
+        self.assertEqual(a.settings, {"enabled": False, "hold_s": 30.0, "small_toks": 8192, "hold_small": "pause",
+                                      "recent_n": 4, "wanted_default": False})
 
     def test_checkpoint_is_the_last_turn_start(self):
         ids = conv(1, 2, 3)

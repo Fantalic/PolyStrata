@@ -1036,6 +1036,8 @@ class StrataEngine:
         self._ctl_erred = False                         # #1059: the control lines ended on an ERR
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
         self.wlock = threading.Lock()                   # stdin writes from several request threads
+        self.pending_session = ""                       # session id for the next prompt write (set_session)
+        self.pending_wanted = []                        # session ids for the next prompt write's WANTED line (set_wanted)
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
 
@@ -1289,6 +1291,18 @@ class StrataEngine:
                 return out
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the DROP command")
+
+    def set_session(self, session_id: str) -> None:
+        """The request's session id (the affinity registry's): the next prompt write sends
+        `SESSION <id>` so the engine tags the conversation slot. Consumed and cleared by
+        that write; an empty id sends nothing."""
+        self.pending_session = session_id or ""
+
+    def set_wanted(self, session_ids: list) -> None:
+        """Sessions whose parked banks are protected from the engine's TTL/eviction (the
+        queue-panel keep toggle). Sent with the next prompt write, like SESSION; consumed
+        and cleared there. An empty list clears the engine's set."""
+        self.pending_wanted = [s for s in (session_ids or []) if s]
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -2097,6 +2111,14 @@ class StrataEngine:
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         keys = self.sampling_keys(sampling or {}) + self.turn_key(ids)
         head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
+        pw = getattr(self, "pending_wanted", [])
+        if pw:
+            self.proc.stdin.write("WANTED " + " ".join(pw) + "\n")
+            self.pending_wanted = []
+        ps = getattr(self, "pending_session", "")
+        if ps:
+            self.proc.stdin.write(f"SESSION {ps}\n")
+            self.pending_session = ""
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
@@ -5220,6 +5242,10 @@ class Service:
         entry = None
         if not par:
             pending = getattr(self.request_trace, "pending", None) or {}
+            if hasattr(self.engine, "set_session"):
+                self.engine.set_session(pending.get("session_id") or "")
+            if hasattr(self.engine, "set_wanted"):
+                self.engine.set_wanted(self.affinity.wanted_sessions())
             entry = self.affinity.register(pending.get("id"), ids, pending.get("path", ""),
                                            pending.get("snippet", ""), pending.get("session_name", ""),
                                            pending.get("session_id", ""), pending.get("root_session", ""),
@@ -6594,7 +6620,8 @@ def make_handler(svc: Service):
                     try:
                         if path == "/api/queue/settings":
                             svc.affinity.set_settings(**{k: req[k] for k in
-                                                         ("enabled", "hold_s", "small_toks", "recent_n")
+                                                         ("enabled", "hold_s", "small_toks", "recent_n",
+                                                          "wanted_default")
                                                          if k in req})
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/focus":
@@ -6619,6 +6646,9 @@ def make_handler(svc: Service):
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/unpause-request":
                             svc.affinity.unpause_request(req.get("id"))
+                            self._json(200, svc.affinity.view())
+                        elif path == "/api/queue/wanted":
+                            svc.affinity.set_wanted(req.get("id"), bool(req.get("wanted")))
                             self._json(200, svc.affinity.view())
                         else:
                             self._json(404, {"error": {"message": "not found"}})

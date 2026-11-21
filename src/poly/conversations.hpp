@@ -23,6 +23,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -430,6 +431,7 @@ public:
             Slot& s = slots_[i];
             if (i == cur_ || s.seq.empty() || s.used == Clock::time_point{}) continue;
             if (ms_since(s.used) < (double) ttl_s * 1000.0) continue;
+            if (slot_wanted(i)) continue;   // the session is queued/wanted: its bank stays
             tokens += len(s);
             s = Slot{};
             ++n;
@@ -471,6 +473,22 @@ public:
     /// Drops parked banks until free host RAM >= ram_target_mib MiB (fork feature,
     /// defined in conversations_ram.hpp).
     size_t drop_for_ram();
+
+    /// Set the server's SESSION <id> tag before a GEN request (fork feature).
+    void set_pending_session(const std::string& id);
+    /// Tag the current slot and drop superseded banks of the same session (fork feature).
+    void tag_session();
+    /// Drop parked banks tagged `id` (fork feature).
+    size_t drop_superseded(const std::string& id);
+    /// Keep session_tags_ in sync with slots_ (fork feature).
+    void sync_tags();
+    /// Set the server's wanted sessions set (fork feature).
+    void set_wanted_sessions(const std::set<std::string>& ids) { wanted_sessions_ = ids; }
+    /// A slot is protected when its session tag is in the wanted set (fork feature).
+    bool slot_wanted(size_t i) const {
+        return i < session_tags_.size() && !session_tags_[i].empty()
+            && wanted_sessions_.count(session_tags_[i]) != 0;
+    }
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -695,6 +713,7 @@ private:
                 const Slot& s = slots_[i];
                 if (i == cur_ || i == keep || s.seq.empty() || s.stamp == newest) continue;
                 if (!skip.empty() && std::find(skip.begin(), skip.end(), i) != skip.end()) continue;
+                if (slot_wanted(i)) continue;   // the session is queued/wanted: its bank stays
                 if (pass == 0 && o_.focus > 0 && clock_ - s.stamp <= (uint64_t) o_.focus) continue;
                 if (out == slots_.size() || bank_bytes(i) < bank_bytes(out) ||
                     (bank_bytes(i) == bank_bytes(out) && s.stamp < slots_[out].stamp))
@@ -856,6 +875,9 @@ private:
     E& e_;
     CacheOptions o_;
     std::vector<Slot> slots_;   // the current conversation and the parked ones
+    std::vector<std::string> session_tags_;   // fork feature: per-slot session tag (conversations_ram.hpp)
+    std::string pending_session_;             // fork feature: the server's SESSION line (conversations_ram.hpp)
+    std::set<std::string> wanted_sessions_;   // fork feature: sessions whose banks the TTL/eviction must skip (conversations_ram.hpp)
     Slot pinned_;               // pin()'s: beside them, never the engine's own, never pushed out
     size_t cur_ = 0;
     uint64_t clock_ = 0;
