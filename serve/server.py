@@ -711,6 +711,8 @@ class ConvCacheLog:
     DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+) bytes=(\d+)")
     CLEAR = re.compile(r"conversation cache: dropped \d+ parked banks for the clear \(\d+ tokens\); "
                        r"parked=(\d+) bytes=(\d+)")
+    POLICY = re.compile(r"\bCACHE park=(\d+) disk=(\S+) cap=(\d+) target=(\d+) slots=(\d+) focus=(\d+) "
+                        r"ttl=(\d+) checkpoints=(\d+)")
     READ_MAX = 1 << 20                                  # at most the last MiB of new lines per read
 
     def __init__(self):
@@ -719,7 +721,7 @@ class ConvCacheLog:
 
     def reset(self):
         self.state = {"parked": 0, "bytes": 0, "evictions": 0, "parks": 0, "restores": 0, "last_event": None,
-                      "last_tokens": None, "last_at": None}
+                      "last_tokens": None, "last_at": None, "settings": None}
 
     def poll(self, path, start) -> dict:
         """The state after the log's new lines; `start` is where the engine's current run began in it."""
@@ -743,6 +745,13 @@ class ConvCacheLog:
         self.pos += end
         now = time.time()
         for line in data[:end].decode("utf-8", "replace").splitlines():
+            m = self.POLICY.search(line)
+            if m:                                           # the engine's policy line: startup echo or an update
+                self.state["settings"] = {"park": int(m.group(1)), "disk": m.group(2), "cap": int(m.group(3)),
+                                          "target": int(m.group(4)), "slots": int(m.group(5)),
+                                          "focus": int(m.group(6)), "ttl": int(m.group(7)),
+                                          "checkpoints": int(m.group(8))}
+                continue
             if "conversation cache:" not in line:
                 continue
             m = self.EVENT.search(line)
@@ -794,6 +803,12 @@ def conversation_cache_view(info: dict, hist: list, totals: dict, parked: dict) 
             "reused_tokens": totals.get("reused", 0), "prompt_tokens": totals.get("prompt_tokens", 0),
             "last_reused": last.get("reused") if last else None,
             "last_prompt": last.get("prompt_tokens") if last else None}
+
+
+# The Settings view's memory keys the engine takes at runtime (the CACHE line): the config key -> the
+# CACHE key.  cache_checkpoints is missing: the ladder budget is read at the engine's start only.
+CACHE_RUNTIME_KEYS = {"cache_mib": "mib", "cache_disk_mib": "disk", "cache_slots": "slots",
+                      "cache_focus": "focus", "cache_ttl_s": "ttl"}
 
 
 _BTRACE = bool(os.environ.get("STRATA_BATCH_TRACE"))
@@ -1297,6 +1312,39 @@ class StrataEngine:
                 return out
             if time.time() > deadline:
                 raise EngineDied("the engine did not answer the DROP command")
+
+    def cache_settings(self, set: dict | None = None, timeout: float = 30.0) -> dict:
+        """`CACHE [key=value ...]` between requests (the caller holds the service's FIFO): the conversation
+        cache's runtime settings (mib, disk N|auto, slots, focus, ttl); a bare CACHE is a read-only query.
+        -> the engine's effective policy (park, disk, cap, target, slots, focus, ttl, checkpoints); raises
+        ValueError with the engine's reason, EngineDied when it ended."""
+        if not self.alive():
+            raise EngineDied("the engine is not running")
+        cmd = "CACHE"
+        for key in ("mib", "disk", "slots", "focus", "ttl"):
+            if set and key in set and set[key] is not None:
+                cmd += f" {key}={set[key]}"
+        self.proc.stdin.write(cmd + "\n")
+        self.proc.stdin.flush()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                line = self.lines.get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                raise EngineDied("the engine did not answer the CACHE command") from None
+            if line is None:
+                raise EngineDied("the engine ended")
+            line = line.strip()
+            if line.startswith("ERR"):
+                raise ValueError(line[4:].strip() or "the engine refused the CACHE command")
+            if line.startswith("CACHE "):
+                out = {}
+                for kv in line.split()[1:]:
+                    k, _, v = kv.partition("=")
+                    out[k] = int(v) if v.lstrip("-").isdigit() else v
+                return out
+            if time.time() > deadline:
+                raise EngineDied("the engine did not answer the CACHE command")
 
     def set_session(self, session_id: str) -> None:
         """The request's session id (the affinity registry's): the next prompt write sends

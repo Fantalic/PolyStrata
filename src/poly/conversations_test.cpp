@@ -768,13 +768,14 @@ void switch_park_partial() {
           "parked row bytes == one chunk (8192 * 16)");
 
     // The original conversation survives in its slot.
-    // Switch back to a: it resumes at the checkpoint position (29999), not from 0.
+    // Switch back to a: it resumes at the largest checkpoint the banked rows back (the bank holds rows
+    // [0, 8192) - a mark beyond them has no rows behind it, so the salvage stops at 6144).
     std::vector<int32_t> a2 = a;
     const int64_t from_a = c.ask(a2);
     check(from_a > 0,
           "switch back to a resumes at the checkpoint (not 0)");
-    check(from_a == 29999,
-          "resume position == the checkpoint (29999)");
+    check(from_a == 6144,
+          "resume position == the largest mark the banked rows back (6144)");
 }
 
 // Nothing banked: admit always false.  Assert park returns false and the old conversation

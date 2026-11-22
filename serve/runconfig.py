@@ -43,6 +43,21 @@ EDITABLE = [
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
+    ("cache_mib", ("arg", "--conversation-cache-mib"),
+     "Host RAM in MiB for parked conversations (auto: from the free RAM once the model loaded; 0: nothing parks). "
+     "Applied to a running engine too."),
+    ("cache_disk_mib", ("arg", "--conversation-cache-disk-mib"),
+     "Disk budget in MiB for banks the host refused to hold in RAM (auto: grows on refusals; 0: off). "
+     "Applied to a running engine too."),
+    ("cache_slots", ("arg", "--conversation-cache-slots"),
+     "Parked conversations at most (the engine's conversation slots). Applied to a running engine too."),
+    ("cache_focus", ("arg", "--conversation-cache-focus"),
+     "A conversation used within this many requests keeps its parked copy while another candidate exists. "
+     "Applied to a running engine too."),
+    ("cache_ttl_s", ("arg", "--conversation-cache-ttl-s"),
+     "Drop a parked conversation after this many seconds of idleness (0: never). Applied to a running engine too."),
+    ("cache_checkpoints", ("arg", "--prompt-cache"),
+     "Checkpoints kept per conversation for the mid-prompt salvage ladder (used from the next start)"),
     ("context", ("arg", "--max-context"),
      "Tokens the model's conversation can hold. Changing it takes effect when the model is switched or restarted."),
     ("kv_resident", ("arg", "--kv-resident"),
@@ -120,11 +135,15 @@ def check(key: str, v, cfg: dict):
     if k == "num>=0":
         return _number(key, v)
     if k == "arg":
-        # the one string-valued engine option; the engine refuses anything else at start
+        # the string-valued engine options; the engine refuses anything else at start
         if key == "kv":
             if v not in ("fp16", "q8_0", "q4_0", "int8", "int8k"):
                 raise ValueError(f"kv: expected one of fp16, q8_0, q4_0, int8, int8k, not {v!r}")
             return v
+        if key in ("cache_mib", "cache_disk_mib"):
+            if v == "auto":
+                return v
+            return _number(key, v, whole=True)
         return _number(key, v, whole=True)
     rule = kind[1]                                     # a sampling key: the server's own rules
     if rule == "num>=0":

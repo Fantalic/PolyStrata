@@ -26,7 +26,7 @@ uint64_t mix(uint64_t h, int32_t t) {
 }
 
 struct Fake {
-    static constexpr int64_t ctx = 1 << 16;
+    static constexpr int64_t ctx = 1 << 20;   // the row caches: big enough for the disk-tier tests' banks
     uint64_t h = 1;
     int64_t at = 0, read = 0;
     size_t state = 8;
@@ -708,6 +708,157 @@ void head_divergence_says_so() {
     check(log.find("dropped 1 superseded banks of session S9") != std::string::npos, "the unsalvageable bank is still dropped as superseded");
 }
 
+// A bank parked with only a prefix of its rows banked: the salvage must not come back past the banked rows -
+// the marks beyond them have no rows behind them, and a read resumed at one would attend over a hole (the
+// banked prefix ends, the mark is beyond it, the tokens in between were never re-read).  The cap is
+// reach()'s: a parked bank is reachable no further than its banked rows go.
+void partial_bank_capped() {
+    CacheOptions o = options(1, 4);   // 1 MiB: an 80000-token bank (1.22 MiB) parks only partially
+    o.park_min = 0;
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 80000);
+    c.ask(a);
+    std::vector<int32_t> b = text(9, 400);
+    b[0] = a[0] == 49999 ? 0 : a[0] + 1;   // starts unlike: a parks whole, no salvage muddies the test
+    c.ask(b);
+    // a's bank: the RAM tier banks 65536 tokens (8 chunks of the 1 MiB budget); the marks beyond that have
+    // no rows behind them.  A probe past the banked rows must come back at or below 65536, not at a mark
+    // in (65536, 78000] - at such a mark the restore would leave rows 65536..mark unread by anyone.
+    std::vector<int32_t> probe(a.begin(), a.begin() + 78000);
+    probe = probe + text(21, 300);
+    const int64_t from = c.ask(probe);
+    check(from > 0 && from <= 65536, "the salvage stops at the banked rows (no hole past them)");
+}
+
+// The server's runtime settings (the CACHE line): set_limits() applies new budgets between requests and
+// the next park uses them.  The values are clamped at the setter, so a malformed server message cannot
+// make the budgets negative and kill parking silently.
+void runtime_limits_apply() {
+    CacheOptions o = options(0, 4);   // no park budget yet
+    o.park_min = 0;
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 40000);
+    c.ask(a);
+    std::vector<int32_t> b = text(9, 400);
+    b[0] = a[0] == 49999 ? 0 : a[0] + 1;   // starts unlike: nothing to salvage, the switch parks a
+    c.ask(b);
+    check(c.kept.parked() == 0, "mib 0: nothing parks");
+    c.kept.set_limits(-5, -1, true, -3, -2);   // the CACHE line's values, clamped at the setter
+    std::vector<int32_t> d = text(5, 400);
+    d[0] = a[0] == 49999 ? 0 : a[0] + 1;
+    c.ask(d);
+    check(c.kept.parked() == 0, "negative values clamp to 0: still no parking");
+    c.kept.set_limits(2, 0, false, 4, 0);   // the CACHE line: mib=2
+    std::vector<int32_t> e = text(7, 400);
+    e[0] = a[0] == 49999 ? 0 : a[0] + 1;
+    c.ask(e);
+    check(c.kept.parked() == 1, "mib raised at runtime: the next park keeps the bank");
+}
+
+// The disk tier completes what the RAM tier leaves: a bank bigger than the RAM budget parks in RAM up to
+// the budget and the rest goes to disk in the same park, so the bank is whole and the probe salvages deep.
+void park_tail_goes_to_disk() {
+    CacheOptions o = options(1, 4);
+    o.disk_mib = 3;
+    o.park_min = 0;
+    o.log = std::fopen("disk_tail_log.txt", "w");
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 80000);
+    c.ask(a);
+    std::vector<int32_t> b = text(9, 400);
+    b[0] = a[0] == 49999 ? 0 : a[0] + 1;
+    c.ask(b);   // parks a: RAM banks its budget's worth, the disk tier banks the rest of the same park
+    check(c.kept.parked() == 1, "the bank is parked, not wiped");
+    std::vector<int32_t> probe(a.begin(), a.begin() + 78000);
+    probe = probe + text(21, 300);
+    const int64_t from = c.ask(probe);
+    check(from > 0, "the whole bank salvages (the tail the RAM refused is on disk)");
+    check(c.kept.evictions() == 0, "no bank was evicted to make the room");
+    if (o.log) { std::fflush(o.log); std::fclose(o.log); }
+    const std::string log = log_text("disk_tail_log.txt");
+    check(log.find(" to disk") != std::string::npos, "the disk tier's park says so in its report line");
+}
+
+// The RAM budget full of parked banks: a new bank's park goes to the disk tier whole instead of evicting
+// the neighbours - the tier's promise is that banks are not wiped to make room for chunks of others.
+void disk_saves_when_ram_refuses() {
+    CacheOptions o = options(1, 4);
+    o.disk_mib = 3;
+    o.park_min = 0;
+    o.log = std::fopen("disk_refuse_log.txt", "w");
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 40000), b = text(2, 40000), d = text(3, 40000);
+    c.ask(a);
+    c.ask(b);   // parks a: 0.61 MiB in RAM, fits
+    c.ask(d);   // parks b: the RAM has 0.39 MiB left, b parks on it plus disk for the tail
+    std::vector<int32_t> e = text(77, 400);
+    e[0] = a[0] == 49999 ? 0 : a[0] + 1;
+    c.ask(e);   // parks d: the RAM budget is spent (a+b hold 1.22 MiB of the 1 MiB budget) - d goes to disk
+    check(c.kept.parked() == 3, "three banks parked");
+    check(c.kept.evictions() == 0, "none of them was evicted for another's chunk");
+    check(c.ask(a) > 0, "a salvages");
+    check(c.ask(b) > 0, "b salvages");
+    check(c.ask(d) > 0, "d salvages (its bank is on disk)");
+    if (o.log) { std::fflush(o.log); std::fclose(o.log); }
+    const std::string log = log_text("disk_refuse_log.txt");
+    check(log.find(" to disk") != std::string::npos, "the disk tier's parks say so");
+}
+
+// The auto disk budget: a park grows disk_mib toward the promise (park_target banks parkable in RAM plus
+// disk), capped; the growth is reported once, in the log.
+void auto_grows_disk_budget() {
+    CacheOptions o = options(2, 4);
+    o.disk_auto = true;
+    o.park_min = 0;
+    o.log = std::fopen("disk_grow_log.txt", "w");
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 400000);   // 6.1 MiB bank: the RAM side banks 2 MiB of it
+    c.ask(a);
+    std::vector<int32_t> b = text(9, 400);
+    b[0] = a[0] == 49999 ? 0 : a[0] + 1;
+    c.ask(b);   // parks a: grow_disk() sets the budget to 6 banks of 7 MiB minus the 2 MiB park = 40 MiB
+    if (o.log) { std::fflush(o.log); std::fclose(o.log); }
+    const std::string log = log_text("disk_grow_log.txt");
+    check(log.find("disk budget raised to 40 MiB") != std::string::npos, "the budget grew to the promise");
+    check(log.find("the biggest bank 7 MiB") != std::string::npos, "the report names the bank that set it");
+
+    // The cap holds the budget down.
+    CacheOptions o2 = options(2, 4);
+    o2.disk_auto = true;
+    o2.disk_cap_mib = 8;
+    o2.park_min = 0;
+    o2.log = std::fopen("disk_cap_log.txt", "w");
+    Chat c2(o2);
+    std::vector<int32_t> a2 = text(1, 400000);
+    c2.ask(a2);
+    std::vector<int32_t> b2 = text(9, 400);
+    b2[0] = a2[0] == 49999 ? 0 : a2[0] + 1;
+    c2.ask(b2);
+    if (o2.log) { std::fflush(o2.log); std::fclose(o2.log); }
+    const std::string log2 = log_text("disk_cap_log.txt");
+    check(log2.find("disk budget raised to 8 MiB") != std::string::npos, "the cap holds the budget down");
+}
+
+// The idle pre-park when the host sits at its floor (no headroom for even one chunk): the disk tier banks
+// a budget-sized chunk anyway, so the banked copy advances instead of waiting for a squeeze that never ends.
+void pre_park_uses_disk_when_host_dry() {
+    CacheOptions o = options(2, 4);
+    o.disk_mib = 4;
+    o.park_min = 0;
+    o.pre_park_floor_mib = 1;
+    o.host_available = [] { return std::optional<uint64_t>(uint64_t(0)); };
+    o.log = std::fopen("disk_prepark_log.txt", "w");
+    Chat c(o);
+    std::vector<int32_t> a = text(1, 40000);
+    c.ask(a);
+    check(c.kept.pre_park(), "the pre-park goes on through the disk tier");
+    check(c.kept.pre_park(), "and again: the banked copy advances while the host stays dry");
+    if (o.log) { std::fflush(o.log); std::fclose(o.log); }
+    const std::string log = log_text("disk_prepark_log.txt");
+    check(log.find("pre-parked") != std::string::npos && log.find(" to disk") != std::string::npos,
+          "the dry-host pre-park reports its disk tier");
+}
+
 }  // namespace
 
 int main() {
@@ -733,6 +884,12 @@ int main() {
     rewrite_flow_salvages();
     shrink_salvages();
     head_divergence_says_so();
+    partial_bank_capped();
+    park_tail_goes_to_disk();
+    disk_saves_when_ram_refuses();
+    auto_grows_disk_budget();
+    pre_park_uses_disk_when_host_dry();
+    runtime_limits_apply();
     std::printf("conversations_ram_test: %d checks passed\n", checks);
     return 0;
 }

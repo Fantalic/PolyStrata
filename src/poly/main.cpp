@@ -358,6 +358,18 @@ struct CacheFlags {
     bool slots_set = false;          // --conversation-cache-slots given (the auto policy leaves a set value alone)
 };
 
+// The cache policy in one machine-readable line: what the server's ConvCacheLog parses, both as the
+// startup echo (the engine's log) and as the CACHE command's reply (the runtime apply).  `disk=` shows
+// the policy (auto or the pinned value), not the budget the auto rule has grown to so far.
+void cache_policy_line(const CacheFlags& f, long long ttl_s, std::FILE* out) {
+    std::fprintf(out,
+                 "CACHE park=%lld disk=%s cap=%lld target=%d slots=%d focus=%d ttl=%lld checkpoints=%d\n",
+                 (long long) f.o.park_mib,
+                 f.disk_auto ? "auto" : std::to_string(f.o.disk_mib).c_str(),
+                 (long long) f.o.disk_cap_mib, f.o.park_target, f.o.park_slots, f.o.focus,
+                 (long long) ttl_s, f.o.checkpoints);
+}
+
 struct Session {
     Engine& engine;
     std::vector<int32_t> eos;
@@ -1095,6 +1107,7 @@ int serve(Session& ss) {
                 // next idle moment.  pre_park() is false when everything is saved (or the host has no
                 // memory to spare): then the loop ends and the idle wait restarts.
                 while (!(have = lines.try_pop(line)) && ss.kept.pre_park()) {}
+                ss.kept.release();   // the parked banks' pages leave the process for their files (the memory policy)
                 ss.kept.relieve();
                 idle_t0 = Clock::now();
             }
@@ -1102,6 +1115,7 @@ int serve(Session& ss) {
                 ss.kept.drop_stale(ss.flags.ttl_s);
                 ss.kept.drop_for_ram();
                 while (!(have = lines.try_pop(line)) && ss.kept.pre_park()) {}
+                ss.kept.release();   // the parked banks' pages leave the process for their files (the memory policy)
                 ss.kept.relieve();
                 idle_t0 = Clock::now();
                 if (!have) continue;
@@ -1207,6 +1221,46 @@ int serve(Session& ss) {
                 while (rest >> id) wanted.insert(id);
             }
             ss.kept.set_wanted_sessions(wanted);
+            std::fflush(stdout);
+            continue;
+        }
+        // CACHE key=value ..., the server's runtime cache settings: mib, disk N|auto, slots, focus, ttl.
+        // A bare CACHE is a read-only query.  The reply is the effective policy in the machine line.
+        if (line.rfind("CACHE", 0) == 0 && (line.size() == 5 || line[5] == ' ')) {
+            int64_t park_mib = ss.flags.o.park_mib, disk_mib = ss.flags.o.disk_mib;
+            bool disk_auto = ss.flags.disk_auto;
+            int park_slots = ss.flags.o.park_slots, focus = ss.flags.o.focus;
+            long long ttl_s = ss.flags.ttl_s;
+            bool touched = false;
+            std::istringstream rest(line.substr(5));
+            std::string tok;
+            while (rest >> tok) {
+                const size_t eq = tok.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string key = tok.substr(0, eq), val = tok.substr(eq + 1);
+                try {
+                    if (key == "mib") park_mib = std::stoll(val), touched = true;
+                    else if (key == "disk" && val == "auto") disk_auto = true, touched = true;
+                    else if (key == "disk") disk_mib = std::stoll(val), disk_auto = false, touched = true;
+                    else if (key == "slots") park_slots = std::stoi(val), touched = true;
+                    else if (key == "focus") focus = std::stoi(val), touched = true;
+                    else if (key == "ttl") ttl_s = std::stoll(val), touched = true;
+                } catch (const std::exception&) {   // a malformed value: that key is ignored
+                }
+            }
+            if (touched) {
+                ss.flags.o.park_mib = std::max<int64_t>(park_mib, 0);
+                ss.flags.o.disk_mib = std::max<int64_t>(disk_mib, 0);
+                ss.flags.o.disk_auto = disk_auto;
+                ss.flags.o.park_slots = std::max(park_slots, 0);
+                ss.flags.o.focus = std::max(focus, 0);
+                ss.flags.ttl_s = std::max<long long>(ttl_s, 0);
+                ss.flags.disk_auto = disk_auto;
+                ss.kept.set_limits(ss.flags.o.park_mib, ss.flags.o.disk_mib, disk_auto,
+                                   ss.flags.o.park_slots, ss.flags.o.focus);
+                std::fprintf(stderr, "strata-poly: conversation cache: settings changed at runtime\n");
+            }
+            cache_policy_line(ss.flags, ss.flags.ttl_s, stdout);
             std::fflush(stdout);
             continue;
         }
@@ -1371,6 +1425,7 @@ int serve(Session& ss) {
         std::fflush(stdout);
         engine.trim();
         ss.kept.relieve();
+        ss.kept.release();   // the parked banks' pages leave the process for their files (the memory policy)
         if (admit >= 0) {
             Slot& sl = slots[(size_t) admit];
             const bool goes_on = std::strcmp(r.finish, "length") == 0 && first >= 0 && admit_max > 1 &&
@@ -1988,6 +2043,8 @@ int main(int argc, char** argv) {
                          cache.disk_auto ? "auto (grows on refusal)" : std::to_string(cache.o.disk_mib).c_str(),
                          (long long) cache.o.disk_cap_mib, cache.o.park_target, cache.o.park_slots,
                          cache.o.focus, cache.ttl_s);
+        if (cache.o.park_mib > 0 && want_serve)
+            cache_policy_line(cache, cache.ttl_s, stderr);   // the same policy, machine-readable
         if (const auto swept = strata::poly::sweep_orphan_temp_files(); swept.first > 0)
             std::fprintf(stderr, "strata-poly: swept %d orphaned conversation-cache files (%.1f MiB) that an engine "
                                  "killed without a chance to clean up left behind\n",

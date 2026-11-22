@@ -66,6 +66,18 @@ public:
     Conversations(E& engine, CacheOptions o)
         : e_(engine), o_(std::move(o)), slots_((size_t) std::max(o_.park_slots, 0) + 1) {}
 
+    /// The server's runtime settings (the CACHE line): the park budget, the disk tier, the parked bank
+    /// count and the focus window.  Nothing here touches the parked banks; the next park, eviction or
+    /// TTL sweep simply uses the new numbers.  park_slots above the engine's slots changes nothing (the
+    /// slots are the shelf), below it the fit evicts down at the next park.
+    void set_limits(int64_t park_mib, int64_t disk_mib, bool disk_auto, int park_slots, int focus) {
+        o_.park_mib = std::max<int64_t>(park_mib, 0);
+        o_.disk_mib = std::max<int64_t>(disk_mib, 0);
+        o_.disk_auto = disk_auto;
+        o_.park_slots = std::max(park_slots, 0);
+        o_.focus = std::max(focus, 0);
+    }
+
     /// The tokens the engine has read.
     const std::vector<int32_t>& seq() const { return slots_[cur_].seq; }
 
@@ -357,6 +369,7 @@ public:
     void release() const {
         for (size_t i = 0; i < slots_.size(); ++i) {
             if (i == cur_) continue;
+            if (o_.focus > 0 && clock_ - slots_[i].stamp <= (uint64_t) o_.focus) continue;   // the hot ones stay
             for (const Checkpoint& m : slots_[i].marks) m.state->release();
             for (const Rows& r : slots_[i].rows) r.blob->release();
         }
@@ -430,8 +443,25 @@ public:
         // day; the next tick continues from here.  The idle banking loop (when the shelf can spill) calls
         // pre_park() back-to-back; a request that arrives interrupts within one small chunk.
         const int64_t cap = chunk_tokens();
-        if (cap < 1) return false;
-        return save_rows(cur_, "pre-parked", t0, from + cap, true);
+        if (cap >= 1) {
+            if (save_rows(cur_, "pre-parked", t0, from + cap, true)) return true;
+            // The RAM side refused the chunk: the disk tier banks it anyway - the idle banking is what
+            // saves the conversation before the next switch, and a refusal that lasts ticks is the wipe
+            // the disk tier exists to prevent.
+            grow_disk();
+            if (o_.disk_mib > 0 || o_.disk_auto)
+                return save_rows(cur_, "pre-parked", t0, from + cap, true, true);
+            return false;
+        }
+        // No headroom for even one chunk (the host sits at the floor): the disk tier banks a budget-sized
+        // chunk without the host's blessing - the rows go to their file at the next release.
+        grow_disk();
+        if ((o_.disk_mib > 0 || o_.disk_auto) && o_.park_mib > 0) {
+            const int64_t rb = (int64_t) e_.row_bytes();
+            const int64_t cap2 = rb > 0 ? ((int64_t) o_.park_mib << 20) / 8 / rb : 0;
+            if (cap2 >= 1) return save_rows(cur_, "pre-parked", t0, from + cap2, true, true);
+        }
+        return false;
     }
 
     /// The parked conversations, the bytes they hold, and how many were pushed out so far.
@@ -564,13 +594,18 @@ private:
     int64_t reach(size_t i, int64_t same, int64_t n) const {
         const Slot& s = slots_[i];
         if (i == cur_ && same > 0 && same == len(s) && n > same) return same;   // the engine is right there
-        return marked(s, same, n);
+        // A parked bank can only be come back to as far as its banked rows go: a mark beyond them has no
+        // rows behind it (a partial park left the tail in the engine, and the engine holds someone else
+        // now), and a read resumed at it would attend over the hole between the banked rows and the mark.
+        return marked(s, same, n, i == cur_ ? INT64_MAX : saved(s));
     }
-    // The last checkpoint of s a prompt of n tokens can be taken up from, when they start with `same` tokens alike.
-    static int64_t marked(const Slot& s, int64_t same, int64_t n) {
+    // The last checkpoint of s a prompt of n tokens can be taken up from, when they start with `same` tokens
+    // alike.  `cap` bounds the position: a parked bank is only good up to its banked rows, so the caller
+    // passes saved(s) - the mark found is an actual one at or below the bound, never the bound itself.
+    static int64_t marked(const Slot& s, int64_t same, int64_t n, int64_t cap = INT64_MAX) {
         int64_t at = 0;
         for (const Checkpoint& m : s.marks)
-            if (m.pos <= std::min(same, n - 1)) at = m.pos;
+            if (m.pos <= std::min(std::min(same, n - 1), cap)) at = m.pos;
         return at;
     }
 
@@ -779,8 +814,12 @@ private:
     // When the host refuses `extra` (the free-RAM gate), a parked conversation is evicted for it too and the check
     // is retried - the newest parked one stays, so a stale RAM reading cannot wipe the whole shelf.  The idle
     // pre-park (`pre`) never evicts: its chunk waits for the next tick instead.  False: it does not fit.
-    bool fit(size_t extra, size_t keep, bool pre = false) {
-        const size_t budget = (size_t) o_.park_mib << 20;
+    //
+    // `file` is the disk tier: the budget is park_mib plus disk_mib and the free-RAM gate is skipped - the
+    // bank's rows go to their file at the next release, so the host's private RAM is only borrowed for the
+    // copy, not held.  A park the RAM side refused is retried this way instead of being wiped whole.
+    bool fit(size_t extra, size_t keep, bool pre = false, bool file = false) {
+        const size_t budget = (size_t) (o_.park_mib + (file ? o_.disk_mib : 0)) << 20;
         const std::function<bool(size_t)>& admit = pre && o_.pre_park_admit ? o_.pre_park_admit : o_.admit;
         for (;;) {
             const Held h = held(cur_);
@@ -790,10 +829,16 @@ private:
             // evicts for it).  Counting it made every pre-park refuse at once with the shelf full - the state
             // opencode lives in - and the switch did all the saving one-shot.
             const size_t shelves = h.count - (pre ? 1 : 0);
-            if (h.bytes + extra <= budget && shelves - leaving <= (size_t) o_.park_slots &&
-                (extra == 0 || !admit || admit(extra)))
-                return true;
+            const bool budget_ok = h.bytes + extra <= budget;
+            const bool slots_ok = shelves - leaving <= (size_t) o_.park_slots;
+            const bool gate_ok = extra == 0 || file || !admit || admit(extra);
+            if (budget_ok && slots_ok && gate_ok) return true;
             if (pre) return false;
+            // The RAM tier does not evict for its budget: the overflow is the disk tier's job - a bank wiped
+            // to admit a chunk of another is the churn the tier exists to prevent.  The slots and the host
+            // gate still evict: a full shelf must free a slot, and a host gate no eviction can satisfy is
+            // retried out below anyway.
+            if (!file && !budget_ok) return false;
             // The newest parked one stays, so a stale RAM reading cannot wipe the whole shelf.
             size_t out;
             if (!pick_victim(keep, out)) return false;
@@ -810,20 +855,57 @@ private:
         const Clock::time_point t0 = Clock::now();
         const int64_t end = s.marks.back().pos;
         cut(s, end);
-        return save_rows(keep, "parked", t0);
+        bool ok = save_rows(keep, "parked", t0);
+        // The RAM side refused, or banked only a prefix: the disk tier saves the rest, so the conversation is
+        // not lost at the switch - a wipe costs the session its whole re-read, a file restore only the row
+        // copy.  The auto budget grows to the promise first, so the retry has room.  The RAM side's partial
+        // truth stands: what it banked stays banked whatever the disk tier manages for the tail.
+        if (!ok || saved(s) < s.marks.back().pos) {
+            grow_disk();
+            if (o_.disk_mib > 0 || o_.disk_auto) {
+                if (save_rows(keep, "parked", t0, INT64_MAX, false, true)) ok = true;
+            }
+        }
+        else grow_disk();
+        return ok;
+    }
+
+    // The auto disk budget: the promise is `park_target` banks parkable in RAM plus disk.  This bank's size
+    // (the biggest in play) sets the floor; the budget rises to meet it, capped.  A fixed budget
+    // (disk_auto off) is not touched.  Quiet: it reports only when the budget moves.
+    void grow_disk() {
+        if (!o_.disk_auto || o_.park_mib < 1) return;
+        const int64_t rb = (int64_t) e_.row_bytes();
+        if (rb < 1) return;
+        const int64_t b = (len(cur()) * rb + (1 << 20) - 1) >> 20;   // this bank's MiB, rounded up
+        if (b > biggest_bank_mib_) biggest_bank_mib_ = b;
+        const int64_t want = std::min(o_.disk_cap_mib,
+                                      (int64_t) o_.park_target * biggest_bank_mib_ - o_.park_mib);
+        if (want > o_.disk_mib) {
+            o_.disk_mib = want;
+            if (o_.log)
+                std::fprintf(o_.log,
+                             "strata-poly: conversation cache: disk budget raised to %lld MiB to keep %d banks"
+                             " parkable (the biggest bank %lld MiB)\n",
+                             (long long) o_.disk_mib, o_.park_target, (long long) biggest_bank_mib_);
+        }
     }
 
     // Copies the rows the current conversation still has only in the engine, up to its last checkpoint, to host
     // memory.  `label` is what say() prints ("parked" or "pre-parked").  `up_to` caps the copy: the idle
     // pre-park passes a bound so one attempt stays small enough for the host's free RAM (the switch's park
-    // passes none and saves to the last checkpoint).  Returns true when the rows are in host memory (or nothing
-    // needed saving), false when the guards or the budget said no.
+    // passes none and saves to the last checkpoint).  `file` is the disk tier: the budget is park_mib plus
+    // disk_mib, the free-RAM gate is skipped, and the chunks are smaller - the bank's rows go to their file at
+    // the next release, so the park that the RAM side refused still lands (its say() carries the note).
+    // Returns true when the rows are banked (or nothing needed saving), false when the guards or the budget
+    // said no.
     bool save_rows(size_t keep, const char* label, Clock::time_point t0, int64_t up_to = INT64_MAX,
-                   bool pre = false) {
+                   bool pre = false, bool file = false) {
         Slot& s = cur();
         const int64_t rb = e_.row_bytes();
         const int64_t from0 = saved(s);
         int64_t from = from0;
+        const char* note = file ? " to disk" : "";
         const int64_t end = std::min(s.marks.back().pos, up_to);
         if (from < end && rb > 0) {
             // The switch's park used to be one blob of the whole delta; a long conversation could not be
@@ -831,25 +913,26 @@ private:
             // re-read everything.  Bank the delta in bounded chunks instead - an eighth of the budget each,
             // the rule the idle pre-park sizes by - and stop at the first chunk the guards refuse.  What
             // earlier chunks banked stays: a partial park keeps the conversation's prefix, and the client
-            // re-reads only the tail beyond it.
-            const int64_t cap = o_.park_mib > 0 ? ((int64_t) o_.park_mib << 20) / 8 / rb : 0;
+            // re-reads only the tail beyond it.  The disk tier halves the chunk again: its admission does not
+            // wait for the host's blessing, so it keeps the borrowed window small.
+            const int64_t cap = o_.park_mib > 0 ? (((int64_t) o_.park_mib << 20) / (file ? 16 : 8)) / rb : 0;
             while (from < end && cap > 0) {
                 const int64_t to = std::min(end, from + cap);
                 const size_t bytes = (size_t) (to - from) * rb;
-                const BlobPtr b = fit(bytes, keep, pre) ? blob(bytes) : nullptr;
+                const BlobPtr b = fit(bytes, keep, pre, file) ? blob(bytes) : nullptr;
                 if (!b) break;
                 e_.save_rows(from, to - from, b->data());
                 s.rows.push_back({b, from, to - from, to - from});
                 from = to;
-                say(label, to, t0, cur_);
+                say(label, to, t0, cur_, note);
             }
         }
         if (from == from0 && from < end) {
             say("skipped", end, t0, slots_.size());
             return false;
         }
-        if (!fit(0, keep, pre)) return false;
-        if (from == from0) say(label, end, t0, cur_);
+        if (!fit(0, keep, pre, file)) return false;
+        if (from == from0) say(label, end, t0, cur_, note);
         return true;
     }
 
@@ -933,6 +1016,7 @@ private:
     uint64_t clock_ = 0;
     size_t evictions_ = 0;
     size_t stale_drops_ = 0;     // conversations dropped by the idle-age TTL
+    int64_t biggest_bank_mib_ = 0;   // the largest bank parked so far (grow_disk()'s floor)
     std::vector<Checkpoint> due_;   // inside()'s checkpoints, until read() makes them the conversation's
     std::vector<int64_t> after_;    // where the conversation's checkpoints are once that read is done
     int64_t turn_ = -1;             // turn_at()'s place in the prompt being read; -1: none
