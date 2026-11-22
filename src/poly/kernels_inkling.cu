@@ -105,6 +105,12 @@ struct ClipSeqs {
     __device__ long long first(int t) const { return pos[t] - t; }
 };
 
+// A call's tokens from a device buffer of positions (a recorded launch: the engine rewrites it every token).
+struct ClipDev {
+    const long long* at;
+    __device__ long long first(int t) const { return at[2 * (long long) t] - t; }
+};
+
 template <class From>
 __global__ void clip_many_kernel(ClipJobs c, int count, From from) {
     const int gi = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
@@ -136,6 +142,7 @@ struct AttnArgs {
     InklingRel rel;
     const float* sinks;
     long long pos;
+    const long long* at;
     int rows, n_head, kv_heads, window, ring;
     float scale;
     int split;   // the split path's keys a split (counted from position 0)
@@ -178,7 +185,7 @@ __global__ void __launch_bounds__(AT_THREADS) attn_kernel(AttnArgs a) {
     const int g = blockIdx.y, t0 = blockIdx.z * TQ;
     const int nt = min(TQ, a.rows - t0);
     const int n_rel = a.rel.n_rel;
-    const long long p0 = a.pos + t0, plast = p0 + nt - 1;
+    const long long p0 = a.at ? a.at[2 * (long long) t0] : a.pos + t0, plast = p0 + nt - 1;
     const long long kb = a.window > 0 && p0 >= a.window ? p0 - a.window + 1 : 0, ke = plast + 1;
 
     // the queries, their relative-position projections; the rows' running max, sum and output
@@ -304,7 +311,7 @@ struct AttnRow {
 };
 struct AttnOne {
     __device__ AttnRow row(const AttnArgs& a, int t) const {
-        return {a.kc, a.vc, a.kq, a.vq, a.pos + t, a.split, a.nslot};
+        return {a.kc, a.vc, a.kq, a.vq, a.at ? a.at[2 * (long long) t] : a.pos + t, a.split, a.nslot};
     }
 };
 struct AttnSeqs {
@@ -946,6 +953,7 @@ struct KvArgs {
     int kv_heads, rows;
     float k_clip, eps;
     long long pos;
+    const long long* at;
 };
 
 // Where kv_store_kernel's tokens go: the call's tokens one after the other in one sequence (a block takes them all),
@@ -955,7 +963,9 @@ struct KvOne {
     __device__ int end(const KvArgs& a) const { return a.rows; }
     __device__ float* state(const KvArgs& a, int which, int) const { return a.state[which]; }
     __device__ const InklingKvDst& dst(const KvArgs& a, int) const { return a.dst; }
-    __device__ long long pos(const KvArgs& a, int t) const { return a.pos + t; }
+    __device__ long long pos(const KvArgs& a, int t) const {
+        return a.at ? a.at[2 * (long long) t] : a.pos + t;
+    }
 };
 struct KvSeqs {
     InklingKvSeq row[kInklingSeqRows];
@@ -1067,7 +1077,7 @@ AttnArgs attn_args(const char* who, const float* q, const InklingRel& rel, const
 void inkling_attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, Kvq8 kq8, Kvq8 vq8,
                     InklingRel rel, const float* sinks, int64_t pos, int rows, float* out, int dim, int n_head,
                     int kv_heads, float scale, int window, int ring, float* work, size_t work_floats, void* stream,
-                    int64_t room) {
+                    int64_t room, const long long* at) {
     if (rows <= 0) return;
     AttnArgs a =
         attn_args("inkling_attend", q, rel, sinks, rows, out, dim, n_head, kv_heads, scale, window, ring, work);
@@ -1076,6 +1086,7 @@ void inkling_attend(const float* q, const uint16_t* kcache, const uint16_t* vcac
     a.kq = kq8;
     a.vq = vq8;
     a.pos = (long long) pos;
+    a.at = at;
     const bool kq = kq8.codes != nullptr, vq = vq8.codes != nullptr;
     const cudaStream_t st = cs(stream);
     // positions + 1, at most: the caller's room when it gives one, else pos + rows
@@ -1287,8 +1298,10 @@ void clip_many(const InklingClipJob* jobs, int count, int rows, const From& from
 }
 }  // namespace
 
-void inkling_clip_many(const InklingClipJob* jobs, int count, int rows, int64_t pos, void* stream) {
-    clip_many(jobs, count, rows, ClipFrom{(long long) pos}, stream);
+void inkling_clip_many(const InklingClipJob* jobs, int count, int rows, int64_t pos, void* stream,
+                       const long long* at) {
+    if (at) clip_many(jobs, count, rows, ClipDev{at}, stream);
+    else clip_many(jobs, count, rows, ClipFrom{(long long) pos}, stream);
 }
 
 void inkling_clip_many_seqs(const InklingClipJob* jobs, int count, int rows, const int64_t* pos, void* stream) {
@@ -1302,9 +1315,11 @@ void inkling_clip_many_seqs(const InklingClipJob* jobs, int count, int rows, con
 void inkling_kv_store(const float* kraw, const float* vraw, float* k_state, float* v_state, const float* k_w,
                       const float* v_w, const float* k_taps, const float* v_taps, int kv_heads, int dim, int rows,
                       float k_clip, float eps, const InklingKvDst& dst, int64_t pos, float* k_out, float* v_out,
-                      void* stream) {
+                      void* stream, const long long* at) {
     if (rows <= 0) return;
     if (dim != AT_DIM) throw std::invalid_argument("inkling_kv_store: heads of 128 values only");
+    if (at && rows > KV_ROWS)   // the batch path below stores with the scalar pos; it is never recorded
+        throw std::invalid_argument("inkling_kv_store: at is for one token at a time");
     const int width = kv_heads * dim;
     if (rows > KV_ROWS) {   // a prompt batch: the separate calls
         if (!k_out || !v_out) throw std::invalid_argument("inkling_kv_store: more than 16 tokens need k_out and v_out");
@@ -1338,6 +1353,7 @@ void inkling_kv_store(const float* kraw, const float* vraw, float* k_state, floa
     a.dst = dst;
     a.kv_heads = kv_heads, a.rows = rows, a.k_clip = k_clip, a.eps = eps;
     a.pos = (long long) pos;
+    a.at = at;
     kv_store_kernel<<<dim3(kv_heads, 2), AT_DIM, 0, cs(stream)>>>(a, KvOne{});
     check_launch("inkling_kv_store");
 }

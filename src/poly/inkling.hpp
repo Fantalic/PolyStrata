@@ -107,6 +107,9 @@ private:
     void copy_stream(int from, int to, int n);
     void attn(Block& B, int il, const float* xq, const float* xk, const float* xv, const void* const* q8, int n);
     int64_t attn_room(const Block& B, int n) const;
+    /// Which recording of a layer's head fits n tokens from pos(): a window layer's attention is sized for the
+    /// context whatever the position, a full one by Engine::room() (a power of two past 1024).
+    int head_key(int il, int n) const override { return blocks_[(size_t) il].swa ? 0 : room_key(n); }
     void post_conv(const float* x, float* state, const Dev& w, float* acc, int n, bool fresh, const Row* rows);
     void dump(const char* name, int il, const float* dev, int width, int n);
     int slot_of(int v) const;   ///< llama.cpp's layer index of visit v (its cache slot), for the dumps

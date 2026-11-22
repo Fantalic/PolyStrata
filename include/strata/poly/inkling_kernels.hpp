@@ -171,10 +171,11 @@ size_t inkling_attend_work_floats(int n_head, int dim);
 ///    (cudaMalloc'd rows of 128 values are).
 ///  - unsplit: one block walks all the keys of a tile of up to 8 tokens (a prompt batch).
 /// Throws std::runtime_error on a launch error.
+/// at: as inkling_clip_many()'s.
 void inkling_attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, Kvq8 kq8, Kvq8 vq8,
                     InklingRel rel, const float* sinks, int64_t pos, int rows, float* out, int dim, int n_head,
                     int kv_heads, float scale, int window, int ring, float* work, size_t work_floats, void* stream,
-                    int64_t room = 0);
+                    int64_t room = 0, const long long* at = nullptr);
 
 // ---- short convolutions --------------------------------------------------------------------------------------
 
@@ -258,7 +259,8 @@ struct InklingClipJob {
     InklingTau tau;
 };
 /// count <= 4.
-void inkling_clip_many(const InklingClipJob* jobs, int count, int rows, int64_t pos, void* stream);
+/// at (null: positions pos + t): 2 values a token (its position, its turn), as Engine::at_; a recorded launch reads
+void inkling_clip_many(const InklingClipJob* jobs, int count, int rows, int64_t pos, void* stream, const long long* at = nullptr);
 
 /// Where inkling_kv_store() puts a layer's keys and values: fp16 (k, v) or Q8_0 (kc/ks, vc/vs, kernels.hpp's Kvq8
 /// layout), each row kv_heads * dim; with ring > 0 position p is row p % ring.
@@ -278,10 +280,11 @@ struct InklingKvDst {
 ///   and into k_out / v_out (rows * kv_heads * dim floats each) when they are not null.
 /// Taps (null: none) and the states as inkling_conv()'s.  dim 128.  More than 16 tokens take the separate calls
 /// (the same results), which work in k_out and v_out: both must then be given (else std::invalid_argument).
+/// at: as inkling_clip_many()'s; only for the one-token-at-a-time path (rows <= 16).
 void inkling_kv_store(const float* kraw, const float* vraw, float* k_state, float* v_state, const float* k_w,
                       const float* v_w, const float* k_taps, const float* v_taps, int kv_heads, int dim, int rows,
                       float k_clip, float eps, const InklingKvDst& dst, int64_t pos, float* k_out, float* v_out,
-                      void* stream);
+                      void* stream, const long long* at = nullptr);
 
 /// inkling_conv() whose output is added to acc (acc += out) instead of written: the attention's and the FFN's
 /// post-convolutions and the residual adds after them (axpy) in one launch.  The same bits as inkling_conv() then
