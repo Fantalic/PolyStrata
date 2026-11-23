@@ -67,6 +67,38 @@ EDITABLE = [
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 
+# Effective defaults for the UI: a display string when the key is absent; None means no fixed default.
+DEFAULTS = {
+    "sampling.temperature": "model card: 1.0 thinking, 0.7 chat",
+    "sampling.top_p": "1",
+    "sampling.top_k": "20",
+    "sampling.min_p": "0",
+    "reasoning_budget_tokens": "0 (no cap)",
+    "fit_max_tokens": "off",
+    "drop_oldest": "off",
+    "truncate_middle": "off",
+    "preserve_thinking": "off",
+    "anthropic_thinking": "model",
+    "effort_position": "start",
+    "aliases": None,
+    "idle_unload_s": "0 (never)",
+    "lazy_load": "off",
+    "engine_silence_s": "300",
+    "api_monitor": "off",
+    "switch_on_request": "off",
+    "open_browser": "off",
+    "vram_reserve_mib": "engine sized",
+    "cache_mib": "auto",
+    "cache_disk_mib": "auto",
+    "cache_slots": "6",
+    "cache_focus": "12",
+    "cache_ttl_s": "0 (never)",
+    "cache_checkpoints": "6",
+    "context": "8192 (engine)",
+    "kv_resident": "0 (off)",
+    "kv": "fp16",
+}
+
 
 def _arg(cfg: dict, flag: str):
     a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
@@ -87,11 +119,12 @@ def value_of(cfg: dict, key: str):
 
 
 def view(cfg: dict, path: str | Path) -> dict:
-    """GET /config: the editable keys with their values (None: not set, the default applies)."""
+    """GET /config: the editable keys with their values (None: not set, the default applies), and a "default"
+    field showing the display string that applies when the value is absent (None)."""
     out = []
     for key, kind, help_ in EDITABLE:
         k = kind[0] if isinstance(kind, tuple) else kind
-        out.append({"key": key, "value": value_of(cfg, key), "help": help_,
+        out.append({"key": key, "value": value_of(cfg, key), "default": DEFAULTS.get(key), "help": help_,
                     "kind": "number" if k in ("sampling", "arg", "int>=0", "num>=0") else k,
                     **({"choices": kind[1]} if k == "enum" else {})})
     return {"file": Path(path).name, "keys": out,

@@ -258,9 +258,17 @@
           <span class="muted small" id="kv-resident-note" hidden>Keeps the newest 16384 attention rows in VRAM and streams the rest from RAM in 4-bit. Frees VRAM at long contexts (384K context runs on an 8 GB card), but decodes about three times slower when the context is full (measured 12.1 vs 35.0 tok/s at a 258K prompt on a 3060 Ti; the all-resident q8_0 path is the faster choice at 262K). Off = the default path, byte-identical. From PR #180 by lepotane.</span>
         </div>
       </div>
+      <div class="st-card mem-card" id="mem-card" hidden>
+        <div class="req-head"><span class="card-title">Conversation memory</span><span class="muted small" id="mem-live" role="status"></span></div>
+        <p class="muted small">How the engine keeps earlier chats ready, so returning to one does not read its whole prompt again. Each <span class="mem-help-demo">?</span> explains a setting. <strong>Apply now</strong> changes only this running engine; <strong>Save into config</strong> also keeps the values for every start.</p>
+        <div class="mem-form" id="mem-form"></div>
+        <div class="cfg-actions"><button class="st-btn" id="mem-apply" type="button">Apply now</button>
+          <button class="st-btn st-btn--primary" id="mem-save" type="button">Save into config</button>
+          <span class="muted small" id="mem-msg" role="status"></span></div>
+      </div>
       <div class="st-card cfg-card" id="cfg-card" hidden>
         <div class="req-head"><span class="card-title">Model settings</span><span class="muted small" id="cfg-file"></span></div>
-        <p class="muted small">Kept in the model's run config for every client. An empty field is the default. Context changes take effect on restart.</p>
+        <p class="muted small">Kept in the model's run config for every client. A value marked <em>( default )</em> is what applies when the field is empty — type a value to change it. Each <span class="mem-help-demo">?</span> explains a setting. Context changes take effect on restart.</p>
         <form class="cfg-form" id="cfg-form"></form>
         <div class="cfg-actions"><button class="st-btn st-btn--primary" id="cfg-save" type="button">Save</button>
           <button class="st-btn" id="cfg-restart" type="button">Save &amp; restart model</button>

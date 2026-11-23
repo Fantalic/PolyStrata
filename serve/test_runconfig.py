@@ -116,6 +116,51 @@ class Apply(unittest.TestCase):
                 with self.assertRaises(ValueError, msg=f"{key} with string should be rejected"):
                     runconfig.check(key, "banana", CFG)
 
+    def test_defaults_are_reported(self):
+        # every SPEC key has a DEFAULTS entry
+        self.assertEqual(set(runconfig.DEFAULTS), set(runconfig.SPEC))
+        v = runconfig.view(CFG, "strata-q2_0.json")
+        d = {k["key"]: k["default"] for k in v["keys"]}
+        self.assertEqual(d["cache_disk_mib"], "auto")
+        self.assertEqual(d["cache_mib"], "auto")
+        self.assertEqual(d["cache_focus"], "12")
+        self.assertEqual(d["cache_ttl_s"], "0 (never)")
+        self.assertIsNone(d["aliases"])
+        self.assertEqual(d["kv"], "fp16")
+        # in the base CFG (cache keys unset) the matching value fields are None
+        got = {k["key"]: k for k in v["keys"]}
+        self.assertIsNone(got["cache_mib"]["value"])
+        self.assertIsNone(got["cache_disk_mib"]["value"])
+        self.assertIsNone(got["cache_slots"]["value"])
+        self.assertIsNone(got["cache_focus"]["value"])
+        self.assertIsNone(got["cache_ttl_s"]["value"])
+        self.assertIsNone(got["cache_checkpoints"]["value"])
+
+    def test_memory_policy_keys(self):
+        # the five runtime knobs and the start-only checkpoint count land in args as whole numbers
+        mem = {"cache_mib": 12288, "cache_disk_mib": 4096, "cache_slots": 6, "cache_focus": 12,
+               "cache_ttl_s": 900, "cache_checkpoints": 10}
+        cfg, changed = runconfig.apply(CFG, mem)
+        self.assertEqual(changed, list(mem))
+        args = cfg["args"]
+        for flag, val in (("--conversation-cache-mib", 12288), ("--conversation-cache-disk-mib", 4096),
+                          ("--conversation-cache-slots", 6), ("--conversation-cache-focus", 12),
+                          ("--conversation-cache-ttl-s", 900), ("--prompt-cache", 10)):
+            self.assertIn(flag, args)
+            self.assertEqual(args[args.index(flag) + 1], str(val), flag)
+
+    def test_disk_size_accepts_auto_but_other_sizes_do_not(self):
+        cfg, changed = runconfig.apply(CFG, {"cache_mib": "auto", "cache_disk_mib": "auto"})
+        self.assertEqual(changed, ["cache_mib", "cache_disk_mib"])
+        self.assertEqual(runconfig.value_of(cfg, "cache_mib"), "auto")
+        self.assertEqual(runconfig.value_of(cfg, "cache_disk_mib"), "auto")
+        for key in ("cache_slots", "cache_focus", "cache_ttl_s", "cache_checkpoints"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                runconfig.apply(CFG, {key: "auto"})
+        for key in ("cache_mib", "cache_disk_mib"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                runconfig.apply(CFG, {key: -1})
+
 
 class Http(unittest.TestCase):
     def setUp(self):
@@ -133,9 +178,9 @@ class Http(unittest.TestCase):
         self.httpd.server_close()
         self.dir.cleanup()
 
-    def call(self, method, body=None, headers=None):
+    def call(self, method, body=None, headers=None, path="/config"):
         h = {"Content-Type": "application/json", **(headers or {})}
-        req = urllib.request.Request(f"http://{self.host}/config", method=method, headers=h,
+        req = urllib.request.Request(f"http://{self.host}{path}", method=method, headers=h,
                                      data=None if body is None else (body if isinstance(body, bytes)
                                                                      else json.dumps(body).encode()))
         try:
@@ -199,6 +244,75 @@ class Http(unittest.TestCase):
         for el in ("cfg-card", "cfg-form", "cfg-save", "cfg-msg"):
             self.assertIn(f'id="{el}"', html)
         self.assertIn('fetch("config", {method: "POST", headers: headers(true)', js)
+        # the grouped Conversation memory panel: its card, five knobs' worth of markup, both buttons, live readout
+        for el in ("mem-card", "mem-form", "mem-live", "mem-apply", "mem-save", "mem-msg"):
+            self.assertIn(f'id="{el}"', html)
+        for key in ("cache_mib", "cache_disk_mib", "cache_slots", "cache_focus", "cache_ttl_s"):
+            self.assertIn(f'key: "{key}"', js)          # MEM_FIELDS drives the generated mem-<key> inputs
+        self.assertIn('id = `mem-${f.key}`', js)
+        self.assertIn("v1/cache/settings", js)           # Apply now is runtime-only
+        self.assertIn("Save into config", html)
+
+    def test_memory_keys_reach_a_live_engine_now(self):
+        # a live engine that understands CACHE gets the changed knobs at once; the file is saved either way
+        calls = []
+
+        class LiveEngine:
+            batch = 1
+
+            def alive(self):
+                return True
+
+            def cache_settings(self, values):
+                calls.append(values)
+                return {"park": 12288, "disk": "auto", "cap": 65536, "target": 6, "slots": 8,
+                        "focus": 20, "ttl": 900, "checkpoints": 10}
+
+        self.svc.engine = LiveEngine()
+        with contextlib.redirect_stdout(io.StringIO()):
+            status, v = self.call("POST", {"set": {"cache_slots": 8, "cache_focus": 20}},
+                                  {"Origin": f"http://{self.host}"})
+        self.assertEqual(status, 200, v)
+        self.assertTrue(v["runtime"]["applied"], v)
+        self.assertEqual(calls, [{"slots": 8, "focus": 20}])
+        self.assertEqual(v["runtime"]["policy"]["slots"], 8)
+        self.assertEqual(self.saved()["args"][-4:], ["--conversation-cache-slots", "8",
+                                                      "--conversation-cache-focus", "20"])
+        # the engine's policy line now feeds the Monitor's live readout
+        self.assertEqual(self.svc.conv_log.state["settings"]["slots"], 8)
+
+    def test_memory_keys_without_a_live_engine_just_save(self):
+        # the MockEngine has no cache_settings: the keys are saved to the file, no runtime reply, no error
+        with contextlib.redirect_stdout(io.StringIO()):
+            status, v = self.call("POST", {"set": {"cache_mib": 8192}}, {"Origin": f"http://{self.host}"})
+        self.assertEqual(status, 200, v)
+        self.assertNotIn("runtime", v)
+        self.assertIn("--conversation-cache-mib", self.saved()["args"])
+
+    def test_runtime_settings_endpoint_applies_without_saving(self):
+        # POST /v1/cache/settings is the panel's Apply-now: the knobs reach a live engine, the config file is
+        # untouched (unlike POST /config), and only the five known keys are passed through
+        calls = []
+
+        class LiveEngine:
+            batch = 1
+
+            def alive(self):
+                return True
+
+            def cache_settings(self, values):
+                calls.append(values)
+                return {"park": 12288, "disk": "auto", "cap": 65536, "target": 6, "slots": 8,
+                        "focus": 20, "ttl": 900, "checkpoints": 10}
+
+        self.svc.engine = LiveEngine()
+        before = self.saved()
+        status, v = self.call("POST", {"mib": 4096, "slots": 8, "focus": 20, "junk": "ignored"},
+                              {"Origin": f"http://{self.host}"}, path="/v1/cache/settings")
+        self.assertEqual(status, 200, v)
+        self.assertEqual(v["status"], "ok")
+        self.assertEqual(calls, [{"mib": 4096, "slots": 8, "focus": 20}])
+        self.assertEqual(self.saved(), before)   # nothing persisted: Apply is runtime only
 
 
 if __name__ == "__main__":

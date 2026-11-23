@@ -4394,6 +4394,24 @@ class Service:
                 ctl.release()
             self.fifo.release()
 
+    def cache_settings(self, values: dict) -> dict:
+        """POST /v1/cache/settings: change the conversation cache's knobs on a running engine, between
+        requests (the CACHE line).  Only the keys sent are changed; nothing is written to the config file.
+        A request that is running finishes first (up to drop_wait_s).  -> {"status": ... and the engine's
+        effective policy}."""
+        if not hasattr(self.engine, "cache_settings"):
+            raise ValueError("this engine cannot change its cache settings at runtime")
+        allowed = ("mib", "disk", "slots", "focus", "ttl")
+        only = {k: v for k, v in (values or {}).items() if k in allowed}
+        if not self.fifo.acquire(timeout=self.drop_wait_s):
+            raise ModelBusy("a request is still running; try again when it has finished")
+        try:
+            if not self.loaded():
+                return {"status": "not loaded", "note": "nothing to change"}
+            out = self.engine.cache_settings(only or None)
+            return {"status": "ok", **out}
+        finally:
+            self.fifo.release()
 
     def _say_died(self, e: Exception) -> None:
         """The server window's line for an engine that died (or was ended, #481) in the middle of a request."""
@@ -6819,6 +6837,14 @@ def make_handler(svc: Service):
                     except EngineDied as e:
                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
+                if path == "/v1/cache/settings":             # the conversation cache's knobs, runtime only
+                    if not self._own_page("the conversation cache can be changed"):
+                        return
+                    try:
+                        self._json(200, svc.cache_settings(req if isinstance(req, dict) else {}))
+                    except EngineDied as e:
+                        self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                    return
 
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
                     self.record = svc.begin_request(path, req, self.headers)
@@ -7088,7 +7114,31 @@ def make_handler(svc: Service):
             if changed:
                 print(f"[strata] the Settings view changed {', '.join(changed)} in {Path(svc.config_path).name} "
                       f"(the earlier file: {bak.name}); used from the next start", flush=True)
-            self._json(200, {**runconfig.view(new, svc.config_path), "changed": changed})
+            runtime = None
+            if changed and any(k in CACHE_RUNTIME_KEYS for k in changed):
+                # the changed memory settings reach a running engine now (the CACHE line): best effort, the
+                # config file is saved either way and a start or a switch to the model applies it as well
+                engine = svc.engine
+                if hasattr(engine, "cache_settings") and (not hasattr(engine, "alive") or engine.alive()):
+                    try:
+                        values = {}
+                        for k in changed:
+                            if k not in CACHE_RUNTIME_KEYS:
+                                continue
+                            v = runconfig.value_of(new, k)
+                            if v is not None:
+                                values[CACHE_RUNTIME_KEYS[k]] = v
+                        policy = engine.cache_settings(values or None)
+                        svc.conv_log.state["settings"] = {key: policy.get(key) for key in
+                                                          ("park", "disk", "cap", "target", "slots", "focus",
+                                                           "ttl", "checkpoints")}
+                        runtime = {"applied": True, "policy": policy}
+                        print(f"[strata] the engine took the cache settings at runtime: "
+                              f"{', '.join(f'{k}={v}' for k, v in sorted(values.items()))}", flush=True)
+                    except (EngineDied, ValueError, OSError) as e:
+                        runtime = {"applied": False, "error": str(e)}
+            self._json(200, {**runconfig.view(new, svc.config_path), "changed": changed,
+                             **({"runtime": runtime} if runtime is not None else {})})
         def _foreign_origin(self) -> bool:
             """A web page of another origin sent this.  The Origin must be this server's own address (host and port),
             or an origin the config trusts (trusted_origins: the web app behind a reverse proxy or tunnel); no Origin
