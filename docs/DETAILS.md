@@ -1,6 +1,7 @@
 # PolyStrata - the details
 
 The technical side of PolyStrata: every measured number, the API, images, all settings and how the engine works.
+Inkling 2 Mini prefill measurements and tuning live in [INKLING.md](INKLING.md).
 New here? Start with the [README](../README.md); installing step by step is in [INSTALL.md](INSTALL.md), the models in
 [MODELS.md](MODELS.md), common problems in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
