@@ -304,6 +304,10 @@ void Inkling::load_layer(int v) {
         std::memcpy(B.probs_b.data(), home(*b).data(*b), (size_t) n_expert_ * sizeof(float));
         B.probs_b_dev = upload(b, blk(p, "exp_probs_b.bias"), n_expert_, 1, kF32);
     }
+    // eval()'s launches read the position on the card (at_), so a token's head and tail are recorded once and
+    // replayed.  step()'s rows carry their positions in the host seq structs, so that path stays unrecorded.
+    L.fixed = true;
+    L.fixed_rows = false;
 }
 
 size_t Inkling::recurrent_floats() const { return (size_t) n_layer_ * conv_floats_; }
@@ -427,6 +431,7 @@ void Inkling::post_conv(const float* x, float* state, const Dev& w, float* acc, 
 // The attention from its three normed inputs (and their Q8_1 copies) to ao_, through the output's convolution.
 void Inkling::attn(Block& B, int v, const float* xq, const float* xk, const float* xv, const void* const* xq8, int n) {
     const int hk = n_kv_ * head_dim_, hq = n_head_ * head_dim_;
+    const long long* at = recording_ ? at_ : nullptr;   // a recorded launch reads the positions from the card
     lin(B.wq, xq, q_, n, xq8[0]);
     lin(B.wgate, xq, gate_, n, xq8[0]);
     lin(B.wrel, xq, rel_, n, xq8[0]);
@@ -452,7 +457,7 @@ void Inkling::attn(Block& B, int v, const float* xq, const float* xk, const floa
     // K and V from their projections into the cache in one launch, Q's and R's clips in another, then the attention
     if (rows_of_) {   // step(): each row a token of its own sequence, with its caches, convolution state and position
         InklingKvSeq kv[kInklingSeqRows];
-        InklingAttnSeq at[kInklingSeqRows];
+        InklingAttnSeq atseq[kInklingSeqRows];
         int64_t pos[kInklingSeqRows];
         for (int i = 0; i < n; ++i) {
             const Row& r = rows_of_[i];
@@ -465,26 +470,26 @@ void Inkling::attn(Block& B, int v, const float* xq, const float* xk, const floa
             kv[i].pos = pos[i] = r.pos;
             const int64_t keep = pos_;   // its room as alone (room() reads pos_)
             pos_ = r.pos;
-            at[i] = attn_seq(q8(), pl, r.pos, attn_room(B, 1));
+            atseq[i] = attn_seq(q8(), pl, r.pos, attn_room(B, 1));
             pos_ = keep;
         }
         inkling_kv_store_seqs(kraw_, vraw_, kv, fp(B.k_conv), fp(B.v_conv), B.swa ? nullptr : ktap_,
                               B.swa ? nullptr : vtap_, n_kv_, head_dim_, n, qk_clip_, rms_eps_, k_, v_, st_);
         inkling_clip_many_seqs(jobs, 2, n, pos, st_);
-        inkling_attend_seqs(q_, at, n, rel, sink_, att_, head_dim_, n_head_, n_kv_, scale, window, ring, awork_,
+        inkling_attend_seqs(q_, atseq, n, rel, sink_, att_, head_dim_, n_head_, n_kv_, scale, window, ring, awork_,
                             awork_n_, st_);
     } else {
         inkling_kv_store(kraw_, vraw_, B.conv, B.conv + v_at, fp(B.k_conv), fp(B.v_conv), B.swa ? nullptr : ktap_,
                          B.swa ? nullptr : vtap_, n_kv_, head_dim_, n, qk_clip_, rms_eps_, kv_dst(q8(), B.plane, ring),
-                         pos_, k_, v_, st_);
-        inkling_clip_many(jobs, 2, n, pos_, st_);
+                         pos_, k_, v_, st_, at);
+        inkling_clip_many(jobs, 2, n, pos_, st_, at);
         dump("Qcur", v, q_, hq, n);
         dump("Kcur", v, k_, hk, n);
         dump("Vcur", v, v_, hk, n);
         dump("Rcur", v, rel_, n_head_ * n_rel_, n);
         const InklingAttnSeq c = attn_seq(q8(), B.plane, pos_, attn_room(B, n));
         inkling_attend(q_, c.kcache, c.vcache, c.kq8, c.vq8, rel, sink_, pos_, n, att_, head_dim_, n_head_, n_kv_,
-                       scale, window, ring, awork_, awork_n_, st_, c.room);
+                       scale, window, ring, awork_, awork_n_, st_, c.room, at);
     }
     dump("kqv_out", v, att_, hq, n);
     mul_sigmoid(att_, gate_, hq, n, hq, false, st_);

@@ -5155,7 +5155,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n, const int32_t* 
             pos_ = keep;
             rows_of_ = rows.data();
             n_rows_of_ = R;
-            if (replay && L.fixed) {
+            if (replay && L.fixed && L.fixed_rows) {
                 void*& made = L.rows_heads[key];
                 if (!made) made = record([&] { layer_head(L, il, R); });
                 ck(cudaGraphLaunch((cudaGraphExec_t) made, cs(st_)), "layer graph");
@@ -5169,7 +5169,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n, const int32_t* 
                 shift_rows(i);
                 pos_ = at[(size_t) i];
                 const size_t head = (size_t) head_key(il, 1) * recs + 3 * wn + (size_t) i;
-                if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, 1); });
+                if (replay && L.fixed && L.fixed_rows) replayed(L.heads, head, [&] { layer_head(L, il, 1); });
                 else layer_head(L, il, 1);
                 shift_rows(-i);
                 pos_ = at[(size_t) i];
@@ -5193,7 +5193,7 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n, const int32_t* 
                 moe_add(R);
             }
         }
-        if (replay && L.fixed) replayed(L.tail, rec, [&] { layer_tail(L, il, R); });
+        if (replay && L.fixed && L.fixed_rows) replayed(L.tail, rec, [&] { layer_tail(L, il, R); });
         else layer_tail(L, il, R);
     }
 

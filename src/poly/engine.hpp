@@ -150,6 +150,7 @@ struct Layer {
     int alias = -1;
     bool fixed = false;   ///< one token's launches can be recorded and replayed for the next ones (eval()): they
                           ///< are the same for every token, or read the position on the card (Engine::at_)
+    bool fixed_rows = true;   ///< step()'s rows may be recorded too (they carry their positions on the card)
     Dev attn_norm, ffn_norm;   ///< the norms ahead of the attention and of the FFN
     // MoE
     Dev gate_inp, sh_gate, sh_up, sh_down;
