@@ -117,6 +117,56 @@ class AffinityRules(unittest.TestCase):
         stranger = a.register("s1", conv(1, 2, 3), session_id="ses_b", root_session="ses_b")
         self.assertFalse(a.decide(stranger))        # same tokens, different session: waits
 
+    def test_another_sessions_followup_waits_behind_the_held_followup(self):
+        """Two tool-looping sessions are both in `recent`.  While A's hold is open, A's own
+        follow-up takes the turn; B's follow-up of its own conversation waits behind it."""
+        a = self.affinity(small_toks=0)
+        a1 = a.register("a1", conv(1, 2), session_id="ses_a", root_session="ses_a")
+        a.served(conv(1, 2), a1)                    # A's turn ends: hold arms for A
+        b1 = a.register("b1", conv(50, 51), session_id="ses_b", root_session="ses_b")
+        a.served(conv(50, 51), b1)                  # B's turn ends: hold arms for B (recent: B, A)
+        a2 = a.register("a2", conv(1, 2, 3), session_id="ses_sub_a", root_session="ses_a")
+        b2 = a.register("b2", conv(50, 51, 52), session_id="ses_sub_b", root_session="ses_b")
+        self.assertFalse(a.decide(a2))              # A's follow-up matches recent[A] but B holds: waits
+        self.assertTrue(a.decide(b2))               # the held session's direct follow-up goes
+
+    def test_a_waiting_followup_is_not_starved_by_a_busy_tool_loop(self):
+        """A follow-up that has waited a whole hold_s takes the turn even while the other session
+        keeps re-arming its hold on every turn - otherwise the other session starves forever."""
+        a = self.affinity(small_toks=0, hold_s=0.05)
+        a1 = a.register("a1", conv(1, 2), session_id="ses_a", root_session="ses_a")
+        a.served(conv(1, 2), a1)
+        b1 = a.register("b1", conv(50, 51), session_id="ses_b", root_session="ses_b")
+        a.served(conv(50, 51), b1)                  # hold for B
+        a2 = a.register("a2", conv(1, 2, 3), session_id="ses_sub_a", root_session="ses_a")
+        self.assertFalse(a.decide(a2))              # waits behind B's hold
+        time.sleep(0.08)                            # longer than the whole hold window
+        a.served(conv(50, 51), b1)                  # B's tool loop re-arms B's hold
+        self.assertTrue(a.decide(a2))               # A is not starved
+
+    def test_an_old_arrival_still_gets_a_fresh_hold_window(self):
+        """A request blocked behind a long generation is old by arrival time but has never been
+        deferred: it must still wait a whole hold window behind the held conversation."""
+        a = self.affinity(small_toks=0, hold_s=0.05)
+        main = a.register("m1", conv(1, 2), session_id="ses_main", root_session="ses_main")
+        a.served(conv(1, 2), main)                  # hold for ses_main
+        a.unregister(main.id)                       # main is out of waiting after serving
+        foreign = a.register("f1", conv(70, 71), session_id="ses_other", root_session="ses_other")
+        foreign.arrived_mono = time.monotonic() - 10.0   # arrived long ago, blocked on the FIFO
+        self.assertFalse(a.decide(foreign))         # fresh window: waits behind the hold
+        time.sleep(0.06)                            # hold window elapses
+        self.assertTrue(a.decide(foreign))          # now it takes the turn
+
+    def test_the_held_conversation_beats_a_foreign_request(self):
+        """The direct follow-up still wins over a foreign request (unchanged rule 3)."""
+        a = self.affinity(small_toks=0)
+        main = a.register("m1", conv(1, 2), session_id="ses_main", root_session="ses_main")
+        a.served(conv(1, 2), main)                  # hold for ses_main
+        followup = a.register("m2", conv(1, 2, 3), session_id="ses_sub", root_session="ses_main")
+        foreign = a.register("f1", conv(70, 71), session_id="ses_other", root_session="ses_other")
+        self.assertTrue(a.decide(followup))
+        self.assertFalse(a.decide(foreign))
+
     def test_an_untagged_served_conversation_still_matches_by_checkpoint(self):
         """No headers (an older plugin, no plugin): the token checkpoint is the only identity - the
         mixed case (tagged waiting request, untagged served conversation) falls back to tokens."""
@@ -132,6 +182,16 @@ class AffinityRules(unittest.TestCase):
         self.assertEqual(v["session_id"], "ses_main")
         self.assertEqual(v["root_session"], "ses_main")
         self.assertEqual(v["agent"], "architect")
+
+    def test_a_closed_session_releases_only_its_hold(self):
+        a = self.affinity(small_toks=0)
+        own = a.register("m1", conv(1, 2), session_id="ses_main", root_session="ses_main")
+        a.served(conv(1, 2), own)
+        self.assertIsNotNone(a.view()["hold"])
+        a.session_closed("ses_other")
+        self.assertIsNotNone(a.view()["hold"])       # another session closing changes nothing
+        a.session_closed("ses_main")
+        self.assertIsNone(a.view()["hold"])
 
     def test_a_small_request_jumps_in_during_a_focus(self):
         a = self.affinity(small_toks=100)
@@ -211,6 +271,16 @@ class AffinityOnService(unittest.TestCase):
         self.assertEqual([k for k, _ in rest], ["done"])
         self.assertEqual(rest[0][1]["finish"], "cancel")   # it ended queued: no generation happened
         self.assertEqual(self.svc.affinity.view()["waiting"], [])
+
+    def test_only_a_disconnected_turn_clears_the_hold(self):
+        ids = self.svc.tok.encode("disconnected turn")
+        entry = self.svc.affinity.register("d1", ids, session_id="ses_d", root_session="ses_d")
+        self.svc._served_turn(ids, entry, ["disconnect"])
+        self.assertIsNone(self.svc.affinity.view()["hold"])
+        self.svc.affinity.unregister(entry.id)
+        done = self.svc.affinity.register("d2", ids, session_id="ses_e", root_session="ses_e")
+        self.svc._served_turn(ids, done, ["stop"])
+        self.assertIsNotNone(self.svc.affinity.view()["hold"])
 
     def test_a_small_request_runs_straight_through_the_hold(self):
         self.svc.affinity.set_settings(small_toks=1000)

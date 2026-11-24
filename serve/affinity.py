@@ -102,8 +102,8 @@ def first_user_snippet(req: dict, chars: int = 60) -> str:
 
 class Entry:
     """One waiting request, as the admission sees it (also what GET /api/queue shows)."""
-    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "ids", "plen", "deferred", "reason",
-                 "session_name", "bundle", "session_id", "root_session", "agent", "wanted")
+    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "defer_since", "ids", "plen", "deferred",
+                 "reason", "session_name", "bundle", "session_id", "root_session", "agent", "wanted")
 
     def __init__(self, id: str, ids: list, path: str, snippet: str, session_name: str = "",
                  session_id: str = "", root_session: str = "", agent: str = "", wanted: bool = False):
@@ -115,6 +115,7 @@ class Entry:
         self.wanted = bool(wanted)                  # fork feature: the keep toggle protects this bank
         self.bundle = root_session or session_id
         self.arrived, self.arrived_mono = time.time(), time.monotonic()
+        self.defer_since = None                     # monotonic time of the first admission deferral (aging basis)
         self.plen = len(ids)
         self.deferred = False                       # was held back at least once (for the view)
         self.reason = ""                            # why it is waiting: hold / focus / affinity
@@ -227,8 +228,21 @@ class Affinity:
             if self.focused:                        # rule 4: focus waits without a timeout
                 ok = _continues(self.focused["prefix"], self.focused["bundle"], entry)
             else:
-                ok = any(_continues(p["prefix"], p["bundle"], entry)
-                         for p in self.recent)      # rule 2: a continuation
+                # A tool follow-up of the held conversation runs before the hold; a follow-up
+                # of another recent session must queue behind it.  Without this, both sessions'
+                # checkpoints are in `recent` and each follow-up jumps the hold (A,B,A,B thrash).
+                held = (self.hold is not None and self._hold_left() > 0
+                        and _continues(self.hold["prefix"], self.hold["bundle"], entry))
+                # Anti-starvation ages from the first deferral, not arrival: a request blocked on
+                # the FIFO during a long generation must still get a full hold window on admission.
+                now = time.monotonic()
+                waited = now - (entry.defer_since if entry.defer_since is not None else now)
+                aged = waited >= self.settings["hold_s"]
+                if self.hold is not None and self._hold_left() > 0 and not aged:
+                    ok = held
+                else:
+                    ok = any(_continues(p["prefix"], p["bundle"], entry)
+                             for p in self.recent)      # rule 2: a continuation
                 if not ok:
                     # another waiting request continues a recent conversation: it goes first
                     others = any(e.id != entry.id and any(_continues(p["prefix"], p["bundle"], e)
@@ -237,14 +251,15 @@ class Affinity:
                     if others:
                         ok = False
                     elif self.hold:                 # rule 3: the hold window
-                        ok = _continues(self.hold["prefix"], self.hold["bundle"], entry) \
-                            or self._hold_left() <= 0
+                        ok = held or self._hold_left() <= 0 or aged
                     else:
                         ok = True                   # nothing defers it: it runs
             if ok:
                 self.counters["runs"] += 1
             elif not entry.deferred:                # count a wait episode once, not every check
                 entry.deferred = True
+                if entry.defer_since is None:       # start the hold-protection clock once, on first deferral
+                    entry.defer_since = time.monotonic()
                 entry.reason = ("focus" if self.focused else
                                 "hold" if self.hold and self._hold_left() > 0 else
                                 "affinity")
@@ -292,6 +307,13 @@ class Affinity:
                     self.hold["paused_at"] = None
             else:
                 self.hold = None                    # expired (or nothing armed): no gap to bridge
+
+    def session_closed(self, bundle: str) -> None:
+        """The client left this conversation: drop its hold so a waiting request does not wait out
+        a window no follow-up can fill.  Other sessions' holds are untouched."""
+        with self.lock:
+            if self.hold is not None and self.hold.get("bundle") == bundle:
+                self.hold = None
 
     def resume_freeze(self) -> None:
         """The request that froze the hold's countdown (hold_small pause) died before serving:

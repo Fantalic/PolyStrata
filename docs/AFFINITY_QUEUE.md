@@ -6,9 +6,14 @@ from another session waits out the window.
 ## Hold window
 
 Twenty seconds of engine time after a turn (`STRATA_AFFINITY_HOLD_S`, default 20). A foreign request that
-lands during the window queues: it reads its prompt fresh when the window ends. Measured on this PC (RTX 3060
-Ti, Qwen3.6-35B-A3B, 12,288 MiB conversation-cache budget) a foreign 20K request waited the full 20 s
-(queue counter `deferred=1`), then read its 20,019 fresh tokens at 2,049 tok/s.
+lands during the window queues: it reads its prompt fresh when the window ends. Only a follow-up of the
+conversation that owns the hold may take the turn ahead of it; a tool follow-up from another session waits
+behind it, and a request that has waited a full window *behind that hold* takes the turn so a busy tool
+loop cannot starve the others. The window starts when it first has to wait, not when it reaches the server:
+time spent queued for a busy engine does not count against it.
+
+A turn that ends because the client disconnected or was stopped clears its hold: no follow-up can
+arrive, so the next waiting request is no longer held back by that conversation.
 
 ## Quick calls never queue
 

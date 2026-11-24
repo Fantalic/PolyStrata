@@ -5228,14 +5228,17 @@ class Service:
         finally:
             self.fifo.release()
 
-    def _served_turn(self, ids, entry=None):
+    def _served_turn(self, ids, entry=None, finish_out=None):
         """The request's prompt ran on the engine (still holding the FIFO): the admission remembers
         the conversation and arms the hold when no continuation is already waiting.  `entry` is the
         request's own admission entry: served() runs before _release_turn (ExitStack LIFO), so the
         entry is still registered and must not count as its own follower.  A served() failure must
-        not stop the unwind: the FIFO release below it depends on it."""
+        not stop the unwind: the FIFO release below it depends on it.  A disconnect or cancel leaves
+        no follow-up to protect, so its hold is cleared here."""
         try:
             self.affinity.served(ids, entry)
+            if entry is not None and finish_out is not None and finish_out[0] in ("disconnect", "cancel"):
+                self.affinity.session_closed(entry.bundle)
         except Exception as e:
             print(f"[strata] affinity: served() failed, the turn state may be stale: {e!r}", flush=True)
 
@@ -5440,8 +5443,9 @@ class Service:
                         rate.clear()                    # the previous request's samples must not leak into this one
                     before = getattr(self.engine, "last", None)
                     last_print = time.time()
+                    finish_out = ["stop"]            # the request's final finish reason, set in the loop's finally
                     if entry is not None:            # the conversation is served: ExitStack runs this
-                        turn.callback(self._served_turn, ids, entry)   # before _release_turn (LIFO)
+                        turn.callback(self._served_turn, ids, entry, finish_out)  # before _release_turn (LIFO)
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
                     for ev in opening:
                         yield "event", ev
@@ -5674,6 +5678,7 @@ class Service:
                     finish = "disconnect"
                     raise
                 finally:
+                    finish_out[0] = finish           # let _served_turn see how this request ended
                     # #266: settle this request's status, history and totals while still holding the fifo: once
                     # it is released the next request sets its own status, which this must not record or clear
                     with self.status_lock:
