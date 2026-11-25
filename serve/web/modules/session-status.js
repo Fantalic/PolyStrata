@@ -26,3 +26,16 @@ export function idOf(entry = {}) {
 export function shortId(id = "") {
   return id ? String(id).slice(0, 8) : "session";
 }
+
+/** Waiting rows offer Pause; a user-paused row offers Play instead. */
+export function queueActionOf(w = {}, q = {}) {
+  if (!w.id) return null;
+  return (q.paused_requests || []).includes(w.id) ? "play" : "pause";
+}
+
+/** A session row is pinned when the server's focus points at it or its root bundle. */
+export function pinStateOf(focused, sessionId = "", bundle = "") {
+  if (!focused || !sessionId || sessionId === "parked") return false;
+  return focused.bundle === sessionId || focused.id === sessionId
+      || (!!bundle && (focused.bundle === bundle || focused.id === bundle));
+}

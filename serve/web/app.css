@@ -100,7 +100,6 @@ main { flex: 1; min-height: 0; display: flex; }
 .queue-collapsed { padding: var(--st-s-2) var(--st-s-3); min-height: 32px; display: flex; align-items: center; }
 .queue-collapsed__text { font-size: var(--st-fs-sm); color: var(--st-ink-muted); white-space: nowrap; overflow: hidden;
                          text-overflow: ellipsis; }
-.queue-expanded { padding: 0 var(--st-s-3) var(--st-s-3); display: flex; flex-direction: column; gap: var(--st-s-2); }
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--st-s-4); }
 .metric-card { padding: var(--st-s-4) var(--st-s-5); }
 .st-metric__value small { font-size: var(--st-fs-md); font-weight: var(--st-fw-medium); color: var(--st-ink-muted); margin-left: 4px; }
@@ -138,38 +137,42 @@ main { flex: 1; min-height: 0; display: flex; }
 .queue-controls { display: flex; align-items: center; gap: var(--st-s-3); flex-wrap: wrap; }
 .queue-controls label, .sessions-foot label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .queue-hold { height: 30px; padding: 0 8px; width: 5.5rem; font-size: var(--st-fs-sm); }
-#queue-body .st-table th, #queue-body .st-table td { white-space: nowrap; padding-inline: 8px; }
-#queue-body td:nth-child(4) { max-width: 480px; overflow: hidden; text-overflow: ellipsis; }
-.queue-state { margin: 0; }
-#queue-body tr[data-id] { cursor: grab; }
-#queue-body tr[data-id]:active { cursor: grabbing; }
-#queue-body tr[data-id].dragging { opacity: .4; }
-#queue-body tr[data-id].drag-over { border-top: 2px solid var(--st-accent); }
-.qgrip { width: 24px; text-align: center; user-select: none; }
-.qgrip .st-icon { width: 14px; height: 14px; color: var(--st-ink-muted); opacity: .5; }
-.qgrip .st-icon:hover { opacity: 1; }
 .table-wrap.all { max-height: 420px; overflow-y: auto; }
 .req-totals { margin: 0; font-size: var(--st-fs-sm); }
 .req-totals:empty { display: none; }
 
-/* Sessions panel: active request pinned above the list, context beside it. */
-.monitor-top { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr); gap: var(--st-s-4); align-items: start; }
+/* Sessions panel: a fixed-height, scrollable list beside the context card. */
+.monitor-top { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(260px, 1fr); gap: var(--st-s-4); align-items: stretch; }
+.sessions-card, .ctx-card { height: 420px; overflow: hidden; }
 .sessions-card { gap: var(--st-s-3); }
 .sessions-head { justify-content: flex-start; flex-wrap: nowrap; gap: var(--st-s-3); }
-.sessions-head .badges { order: 2; flex-wrap: nowrap; }
 .sessions-head .queue-controls { order: 3; margin-left: auto; flex-wrap: nowrap; }
 .queue-control { height: 28px; padding: 0 10px; font-size: var(--st-fs-xs); white-space: nowrap; }
 .session-active { padding: var(--st-s-2) var(--st-s-3); border-radius: var(--st-r-md); background: var(--st-surface-2); }
 .session-active__row { display: flex; align-items: center; gap: var(--st-s-2); flex-wrap: wrap; font-size: var(--st-fs-sm); }
 .session-active__id { margin-left: auto; font-variant-numeric: tabular-nums; }
-.session-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.session-list { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 6px; overflow-y: auto; padding-right: 2px; }
 .session-list:empty { display: none; }
-.session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center;
+.session-group-title { display: flex; align-items: center; gap: 8px; padding: 2px 2px 0; color: var(--st-ink-muted);
+                       font-size: var(--st-fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.session-group-title::after { content: ""; flex: 1; height: 1px; background: var(--st-line); }
+.session-row { display: grid; grid-template-columns: 84px minmax(0, 1fr) 180px 68px 176px; align-items: center;
                gap: var(--st-s-2); padding: 6px 8px; border-radius: var(--st-r-md); background: var(--st-surface);
                border: 1px solid var(--st-line); font-size: var(--st-fs-sm); }
 .session-row__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--st-fw-medium); }
 .session-row__detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-row__id { font-variant-numeric: tabular-nums; }
+.session-row__actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.session-row__btn { height: 24px; min-width: 44px; padding: 0 6px; font-size: var(--st-fs-xs); cursor: pointer;
+                    border: 1px solid var(--st-line); border-radius: var(--st-r-md);
+                    background: var(--st-surface-2); color: var(--st-ink-muted); }
+.session-row__btn:hover { color: var(--st-accent-text); border-color: var(--st-accent); }
+.session-row__pin[aria-pressed="true"] { color: var(--st-accent-text); border-color: var(--st-accent); font-weight: var(--st-fw-bold); }
+.session-row__toggle { min-width: 26px; }
+.session-row__expanded { grid-column: 1 / -1; padding: 6px 8px 8px; border-top: 1px solid var(--st-line);
+                         color: var(--st-ink-muted); font-size: var(--st-fs-sm); }
+.session-row__expanded[hidden] { display: none; }
+.session-row__input { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--st-ink, inherit); }
 .session-badge { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px;
                  border-radius: var(--st-r-pill); font-size: var(--st-fs-xs); font-weight: 700;
                  background: var(--st-surface-2); color: var(--st-ink-muted); border: 1px solid var(--st-line); }
@@ -269,64 +272,6 @@ main { flex: 1; min-height: 0; display: flex; }
 .drawer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--st-s-3); margin-top: var(--st-s-2); }
 .st-toast { animation: toast-in 180ms var(--st-ease); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
-
-/* The waiting-requests table is always visible; its controls live in .sessions-foot. */
-.queue-expanded-detail {
-  padding: 12px 16px;
-  background: var(--st-surface);
-  font-size: 13px;
-  line-height: 1.6;
-}
-.queue-expanded-detail div {
-  margin-bottom: 4px;
-}
-.queue-expanded-detail strong {
-  color: var(--st-ink-muted);
-  font-weight: 500;
-  min-width: 140px;
-  display: inline-block;
-}
-.detail-message {
-  word-wrap: break-word;
-  max-width: 100%;
-  display: inline;
-}
-.queue-row {
-  cursor: default;
-}
-.queue-row td.qgrip {
-  cursor: grab;
-  user-select: none;
-  width: 24px;
-  text-align: center;
-}
-.queue-row td.qgrip:hover {
-  color: var(--st-accent);
-}
-.queue-row td .queue-pause-btn {
-  margin-right: 4px;
-}
-.queue-row-expanded td {
-  padding: 0 !important;
-  border: none !important;
-}
-.queue-row-expanded {
-  background: var(--st-surface);
-}
-.queue-row:hover {
-  background: var(--st-surface-1);
-}
-/* Root session and agent badges in the session column */
-.queue-row td .muted small {
-  margin-left: 4px;
-}
-/* Drag-and-drop states */
-.queue-row.dragging {
-  opacity: 0.5;
-}
-.queue-row.drag-over {
-  border-top: 2px solid var(--st-accent);
-}
 
 /* ---------------------------------------------------------------- narrow screens */
 /* tabs that do not fit the header (a narrow phone, or Images on) scroll instead of widening the page */

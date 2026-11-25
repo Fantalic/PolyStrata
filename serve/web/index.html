@@ -109,13 +109,7 @@
         <div class="st-card queue-card sessions-card" id="queue-card">
           <div class="queue-head sessions-head">
             <span class="card-title">Sessions</span>
-            <span class="badges" id="state-badges">
-              <span class="st-badge" data-s="idle">Idle</span>
-              <span class="st-badge st-badge--reading" data-s="reading">Reading</span>
-              <span class="st-badge st-badge--generating" data-s="generating">Generating</span>
-              <span class="st-badge st-badge--queued" data-s="queued">Queued</span>
-              <span class="st-badge st-badge--error" data-s="error">Error</span>
-            </span>
+
             <div class="queue-controls">
               <button class="st-btn st-btn--secondary queue-control" id="queue-skip" type="button" disabled>Skip wait</button>
               <button class="st-btn st-btn--secondary queue-control" id="queue-pause" type="button" hidden>Pause queue</button>
@@ -137,17 +131,8 @@
           <!-- sessions.js fills this with session rows; no placeholder, so an empty list takes no space. -->
           <div class="session-list" id="session-list" aria-live="polite"></div>
 
-          <!-- The waiting-requests table stays visible; its controls and status live in the footer below it. -->
-          <div class="queue-expanded" id="queue-expanded">
-            <div class="table-wrap">
-              <table class="st-table">
-                <thead><tr><th>Arrived</th><th class="num">Tokens</th><th>State</th><th>Session</th><th>Endpoint</th><th></th></tr></thead>
-                <tbody id="queue-rows"><tr data-placeholder><td colspan="6" class="muted">No requests waiting</td></tr></tbody>
-              </table>
-            </div>
-          </div>
 
-          <!-- One footer row under the table: history, queue controls, context debug and status. -->
+          <!-- One footer row under the sessions list: history, queue controls, context debug and status. -->
           <div class="sessions-foot">
             <button class="st-btn st-btn--secondary" id="sessions-history-toggle" type="button" aria-expanded="false">Show history</button>
             <label class="muted small"><input type="checkbox" id="queue-aff"> Affinity</label>
