@@ -5,13 +5,12 @@ from another session waits out the window.
 
 ## Hold window
 
-Twenty seconds of engine time after a turn (`STRATA_AFFINITY_HOLD_S`, default 20). A conversation the
-server has not seen before queues during the window and reads its prompt fresh when the window ends. A
-follow-up of any conversation served recently runs at once: a tool call picks up without an idle gap and
-its bank stays warm. The window's own follow-up goes first when both are queued, and a request that has
-waited a full window *behind that hold* takes the turn so a new conversation cannot starve. The window
-starts when it first has to wait, not when it reaches the server: time spent queued for a busy engine does
-not count against it.
+Twenty seconds of engine time after a turn (`STRATA_AFFINITY_HOLD_S`, default 20). A foreign request that
+lands during the window queues: it reads its prompt fresh when the window ends. Only a follow-up of the
+conversation that owns the hold may take the turn ahead of it; a tool follow-up from another session waits
+behind it, and a request that has waited a full window *behind that hold* takes the turn so a busy tool
+loop cannot starve the others. The window starts when it first has to wait, not when it reaches the server:
+time spent queued for a busy engine does not count against it.
 
 A turn that ends because the client disconnected or was stopped clears its hold: no follow-up can
 arrive, so the next waiting request is no longer held back by that conversation.

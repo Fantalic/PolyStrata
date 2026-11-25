@@ -130,18 +130,6 @@ class AffinityRules(unittest.TestCase):
         self.assertFalse(a.decide(a2))              # A's follow-up matches recent[A] but B holds: waits
         self.assertTrue(a.decide(b2))               # the held session's direct follow-up goes
 
-    def test_a_warm_followup_runs_at_once_while_another_session_holds(self):
-        """A known conversation's tool call picks up immediately even while another session's
-        window is open: waiting out the whole window leaves the engine idle mid tool loop."""
-        a = self.affinity(small_toks=0)
-        a.served(conv(50, 51))                      # B's turn: hold for B
-        a.served(conv(1, 2))                        # A's turn: A joins recent
-        a.served(conv(50, 51))                      # B again: B holds, A still recent
-        followup = a.register("a2", conv(1, 2, 3))  # A's tool follow-up
-        self.assertTrue(a.decide(followup))         # warm: no window to wait out
-        foreign = a.register("f1", conv(70, 71))    # a conversation the server has not seen
-        self.assertFalse(a.decide(foreign))         # still waits out the window
-
     def test_a_waiting_followup_is_not_starved_by_a_busy_tool_loop(self):
         """A follow-up that has waited a whole hold_s takes the turn even while the other session
         keeps re-arming its hold on every turn - otherwise the other session starves forever."""

@@ -10,16 +10,14 @@ what runs.  The rules, in order:
       A quick call never queues; what it does to an armed hold is STRATA_AFFINITY_HOLD_SMALL -
       pause (default: the countdown freezes while it runs and resumes after), reset (a fresh
       window after it), or run (it burns the window).
-  2. A prompt that continues a recently served conversation runs before a foreign big one and
-     takes the turn at once, even while another session's hold is open: a tool-call follow-up
-     picks up without an idle gap and its bank stays warm.
+  2. A prompt that continues a recently served conversation runs before a foreign big one.
      "Same conversation" is the engine's own turn checkpoint: the prompt's tokens up to its last
      turn-start token (<|im_start|>, the engine's TURN_ID) - the next turn of a chat re-renders
      exactly that prefix, while another session differs before it.
-  3. A big request from a conversation the server has not seen is held while the hold window is
-     open: after a big turn with no continuation queued, the server waits hold_s before it serves
-     a new conversation.  A known conversation's follow-up runs at once.  hold_s is one knob for
-     both the wait and the new request's max deferral (a hold expires, the waiting request goes).
+  3. A foreign big request is held while the hold window is open: after a big turn with no
+     continuation queued, the server waits hold_s for the same session's follow-up before it
+     serves a foreign one.  hold_s is one knob for both the wait and the foreign request's max
+     deferral (a hold expires, the waiting foreign request goes).
   4. Focus mode (set from the monitor page): one conversation is pinned; its continuations run
      first and the server waits for the follow-up without a timeout, until Skip lets one foreign
      request through or Unfocus clears it.
@@ -230,29 +228,21 @@ class Affinity:
             if self.focused:                        # rule 4: focus waits without a timeout
                 ok = _continues(self.focused["prefix"], self.focused["bundle"], entry)
             else:
-                # A follow-up of any conversation served recently keeps that conversation's bank
-                # warm: it takes the turn as soon as it arrives instead of waiting out another
-                # session's window.  The window's own follow-up still goes first when it is queued.
+                # A tool follow-up of the held conversation runs before the hold; a follow-up
+                # of another recent session must queue behind it.  Without this, both sessions'
+                # checkpoints are in `recent` and each follow-up jumps the hold (A,B,A,B thrash).
                 held = (self.hold is not None and self._hold_left() > 0
                         and _continues(self.hold["prefix"], self.hold["bundle"], entry))
-                warm = any(_continues(p["prefix"], p["bundle"], entry) for p in self.recent)
                 # Anti-starvation ages from the first deferral, not arrival: a request blocked on
                 # the FIFO during a long generation must still get a full hold window on admission.
                 now = time.monotonic()
                 waited = now - (entry.defer_since if entry.defer_since is not None else now)
                 aged = waited >= self.settings["hold_s"]
-                if warm and not held and self.hold is not None and self._hold_left() > 0 and not aged:
-                    # another session's bank is warm too, but the window's owner goes first
-                    ok = not any(e.id != entry.id
-                                 and _continues(self.hold["prefix"], self.hold["bundle"], e)
-                                 for e in self.waiting.values())
-                elif warm:
-                    ok = True
-                elif self.hold is not None and self._hold_left() > 0 and not aged:
+                if self.hold is not None and self._hold_left() > 0 and not aged:
                     ok = held
                 else:
                     ok = any(_continues(p["prefix"], p["bundle"], entry)
-                             for p in self.recent)      # False here: a new conversation
+                             for p in self.recent)      # rule 2: a continuation
                 if not ok:
                     # another waiting request continues a recent conversation: it goes first
                     others = any(e.id != entry.id and any(_continues(p["prefix"], p["bundle"], e)
