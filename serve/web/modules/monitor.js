@@ -1,6 +1,7 @@
 ﻿// Monitor dashboard and the single-request queue, both fed by this server's own endpoints.
-import { $, toast, copyText, esc, icon, fmt, gb, headers, state } from "./runtime.js";
+import { $, toast, copyText, esc, icon, fmt, kfmt, ctxfmt, gb, headers, state } from "./runtime.js";
 import { loadMcp } from "./mcp.js";
+import { renderSessions } from "./sessions.js";
 
 // ------------------------------------------------------------------ Monitor
 const METRICS = [
@@ -82,8 +83,9 @@ export function render(m) {
     setPill("idle", "Idle");
   }
   if (live.queued > 0) setPill("queued", `${live.queued} queued`);
-  if (state.tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
+  // The cache card is independent of the session list: render it even if another panel fails.
   if (state.tab === "monitor") renderConvCache(m.conversation_cache);
+  if (state.tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (state.tab === "monitor") pollQueue();
   if (state.tab === "monitor") pollLCBadge();
   if (state.tab === "about") renderAbout(eng, hw, st);
@@ -99,9 +101,18 @@ function since(t) {
   return s < 60 ? "just now" : s < 3600 ? `${fmt(s / 60)} min ago` : `${fmt(s / 3600, 1)} h ago`;
 }
 function renderConvCache(c) {
-  $("cc-card").hidden = !c;
-  if (!c) return;                                  // an older server
   const pct = (a, b) => (b ? `${Math.min(100, (100 * a) / b)}%` : "0%");
+  if (!c) {                                        // an older server: say so rather than showing an empty card
+    $("cc-card").hidden = false;
+    $("cc-bars").hidden = true;
+    $("cc-sum").textContent = "";
+    facts($("cc-facts"), [["Cache data", "This server does not expose conversation-cache data."]]);
+    $("cc-note").textContent = "";
+    const clear = $("cc-clear");
+    if (clear) clear.disabled = true;
+    return;
+  }
+  $("cc-card").hidden = false;
   $("cc-bars").hidden = !c.enabled;
   if (c.enabled) {
     $("cc-slots-text").textContent = `${fmt(c.parked)} / ${fmt(c.slots)}`;
@@ -113,12 +124,14 @@ function renderConvCache(c) {
   $("cc-sum").textContent = c.requests ? `${fmt(c.requests_reused)} of ${fmt(c.requests)} requests reused part of their prompt` : "";
   const share = c.prompt_tokens ? ` (${fmt((100 * c.reused_tokens) / c.prompt_tokens)}% of all prompt tokens)` : "";
   const event = c.last_event ? `${c.last_event === "parked" ? "Parked" : "Restored"} ${fmt(c.last_tokens)} tokens, ${since(c.last_at)}` : null;
-  facts($("cc-facts"), [
+  const ccRows = [
     ["Last request", c.last_prompt != null ? `${fmt(c.last_reused || 0)} of ${fmt(c.last_prompt)} prompt tokens reused` : null],
     ["Reused since start", c.requests ? `${fmt(c.reused_tokens)} tokens${share}` : null],
     ["Parked / restored", c.enabled ? `${fmt(c.parks)} / ${fmt(c.restores)}${c.evictions ? ` · ${fmt(c.evictions)} evicted` : ""}` : null],
     ["Last switch", c.enabled ? event : null],
-  ]);
+  ];
+  if (!ccRows.some((r) => r[1] != null && r[1] !== "")) ccRows.push(["Cache data", "No conversation-cache activity recorded yet."]);
+  facts($("cc-facts"), ccRows);
   $("cc-note").textContent = c.enabled
     ? "A request that continues a parked conversation gets its state back instead of reading it again; the oldest goes when the slots or the memory are full."
     : "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), add \"--conversation-cache-mib\", \"8192\" to the run config's args (docs/DETAILS.md).";
@@ -154,6 +167,13 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   const on = live.queued > 0 ? "queued" : live.state;
   ccBusy = on === "queued" || live.state === "reading" || live.state === "generating" || live.state === "error";
   for (const b of document.querySelectorAll("#state-badges .st-badge")) b.classList.toggle("on", b.dataset.s === on || b.dataset.s === live.state);
+  const activeBadge = $("session-active-badge");
+  if (activeBadge) {
+    const cls = live.state === "error" ? "error" : live.state === "reading" ? "reading"
+      : live.state === "generating" ? "generating" : on === "queued" ? "queued" : "idle";
+    activeBadge.className = `st-badge session-badge session-badge--${cls}`;
+    activeBadge.textContent = {idle: "Idle", reading: "Reading", generating: "Generating", queued: "Queued", error: "Error"}[cls];
+  }
   const prog = $("state-progress");
   let label = "Waiting for a request", detail = "", pct = 0;
   if (live.state === "reading") {
@@ -316,7 +336,7 @@ $("req-all").addEventListener("click", () => { state.reqShowAll = !state.reqShow
 // Who waits for the single-request turn: per waiting call its arrival, size, wait reason and the
 // session identifier (the last user message's start), plus the hold and the focus.  The controls
 // POST to /api/queue/... (own page + key, like api/models/load).  An older server has no
-// /api/queue: the card stays hidden (the cc-card pattern).
+// /api/queue: when it is missing, the card shows a note instead of disappearing.
 const queueBadge = {queued: ["", "queued"], affinity: ["st-badge--queued", "affinity"],
                     hold: ["st-badge--reading", "hold"], focus: ["st-badge--generating", "focus"]};
 
@@ -325,9 +345,12 @@ async function pollQueue() {
     const r = await fetch("api/queue", {headers: headers()});
     const q = await r.json();
     if (!r.ok) throw new Error(q?.error?.message || `HTTP ${r.status}`);
+    state.lastQueue = q;
     renderQueue(q);
+    renderSessions(q, state.lastMetrics);
   } catch (e) {
-    $("queue-card").hidden = true;                 // no endpoint: an older server
+    const note = $("queue-note");
+    if (note) note.textContent = "Queue controls are unavailable on this server.";
   }
 }
 
@@ -383,9 +406,11 @@ function renderQueue(q) {
   if (aff.checked !== q.settings.enabled) aff.checked = q.settings.enabled;
   const holdIn = $("queue-hold");
   if (document.activeElement !== holdIn) holdIn.value = q.settings.hold_s;
-  $("queue-skip").disabled = !state.queueExpanded || !(q.hold || q.focused);
-  $("queue-play").hidden = q.paused;
-  $("queue-pause").hidden = !q.paused;
+  $("queue-skip").disabled = !(q.hold || q.focused);
+  $("queue-play").hidden = !q.paused;
+  $("queue-pause").hidden = q.paused;
+  const note = $("queue-note");
+  if (note) note.textContent = q.paused ? "Queue paused: new requests will wait." : "";
 
   // Collapsed summary text
   const collapsedText = $("queue-collapsed-text");
@@ -412,20 +437,19 @@ function renderQueue(q) {
   if (q.hold) lines.push(`Holding for the last conversation's follow-up: ${fmt(q.hold.remaining_s, 1)} s left`);
   if (!q.settings.enabled) lines.push("Affinity is off: requests take the turn in arrival order.");
   $("queue-state").textContent = lines.join("  |  ");
-  if (!state.queueExpanded) return;                        // expanded body hidden: stop after summary
 
   // Sort by context size (smaller requests move up)
   const sorted = [...q.waiting].sort((a, b) => a.prompt_tokens - b.prompt_tokens);
 
   const rows = $("queue-rows");
   if (!sorted.length) {
-    // Only clear if there were rows before (diff-based)
-    const existing = rows.querySelectorAll("tr[data-id].queue-row");
-    if (existing.length > 0) {
-      rows.innerHTML = `<tr><td colspan="6" class="muted">No requests waiting</td></tr>`;
+    // Only replace the rows when there were any, so the empty state stays stable on every poll.
+    if (rows.querySelector("tr[data-id].queue-row")) {
+      rows.innerHTML = `<tr data-placeholder><td colspan="6" class="muted">No requests waiting</td></tr>`;
     }
     return;
   }
+  rows.querySelector("tr[data-placeholder]")?.remove();
 
   // Diff-based update: only change what changed.
   // Only select main rows (queue-row class) — detail rows have the same data-id and must not conflict.
@@ -597,12 +621,7 @@ function updateQueueRow(row, w) {
   }
 }
 
-$("queue-expand").addEventListener("click", () => {
-  state.queueExpanded = !state.queueExpanded;
-  $("queue-expanded").hidden = !state.queueExpanded;
-  $("queue-expand").setAttribute("aria-expanded", String(state.queueExpanded));
-  if (state.lastMetrics) render(state.lastMetrics);            // redraw at once instead of a second's gap
-});
+// The waiting-requests table is always visible: there is no expand toggle.
 $("queue-aff").addEventListener("change", async () => {
   const r = await fetch("api/queue/settings", {method: "POST", headers: headers(true),
                                                body: JSON.stringify({enabled: $("queue-aff").checked})});
@@ -615,10 +634,7 @@ $("queue-hold").addEventListener("change", async () => {
                                                body: JSON.stringify({hold_s: v})});
   if (!r.ok) toast("error", "Not applied", `HTTP ${r.status}`);
 });
-$("queue-skip").addEventListener("click", async () => {
-  const r = await fetch("api/queue/skip", {method: "POST", headers: headers(true), body: "{}"});
-  if (!r.ok) toast("error", "Skip failed", `HTTP ${r.status}`);
-});
+$("queue-skip").addEventListener("click", () => queueAction("api/queue/skip", "Skip"));
 $("queue-rows").addEventListener("click", async (e) => {
   // Handle expand/collapse (grip cell)
   const gripCell = e.target.closest("td[data-action='expand']");
@@ -696,11 +712,17 @@ $("queue-rows").addEventListener("drop", async (e) => {
   const newOrder = allRows.map(r => r.dataset.id);
   await reorderQueue(newOrder);
 });
-$("queue-play").addEventListener("click", async () => {
-  const r = await fetch("api/queue/play", {method: "POST", headers: headers(true), body: "{}"});
-  if (!r.ok) toast("error", "Play failed", `HTTP ${r.status}`);
-});
-$("queue-pause").addEventListener("click", async () => {
-  const r = await fetch("api/queue/pause", {method: "POST", headers: headers(true), body: "{}"});
-  if (!r.ok) toast("error", "Pause failed", `HTTP ${r.status}`);
-});
+async function queueAction(path, label) {
+  try {
+    const r = await fetch(path, {method: "POST", headers: headers(true), body: "{}"});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const q = await r.json();
+    state.lastQueue = q;
+    renderQueue(q);
+    renderSessions(q, state.lastMetrics);
+  } catch (e) {
+    toast("error", `${label} failed`, e.message);
+  }
+}
+$("queue-play").addEventListener("click", () => queueAction("api/queue/play", "Resume"));
+$("queue-pause").addEventListener("click", () => queueAction("api/queue/pause", "Pause"));

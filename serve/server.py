@@ -3506,6 +3506,8 @@ class Service:
         self.api_requests = collections.deque(maxlen=100)  # bounded I/O in memory; no headers or API keys
         self.request_trace = threading.local()
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
+        # The identity of the most recent model request, for the Monitor's active-session row.
+        self.active_session: dict = {}
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0,
@@ -4619,6 +4621,7 @@ class Service:
                    "session_name": first_user_snippet(req) or last_user_snippet(req),
                    "session_id": session_id, "root_session": root_session, "agent": agent}
         self.request_trace.pending = pending
+        self.active_session = dict(pending)              # the Monitor's active-row identity (thread-safe: one dict swap)
         if not self.api_monitor:
             return None
         raw = json.dumps(req, ensure_ascii=False, indent=2)
@@ -4678,7 +4681,11 @@ class Service:
                 "tok_s": round(self._tok_s(), 1) if state == "generating" else None,
                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
-                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
+                "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None,
+                "session_id": self.active_session.get("session_id", ""),
+                "session_name": self.active_session.get("session_name", ""),
+                "root_session": self.active_session.get("root_session", ""),
+                "agent": self.active_session.get("agent", "")}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
         par = int(getattr(self.engine, "batch", 0) or 0)
@@ -5698,6 +5705,11 @@ class Service:
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
+                                # Session identity for the Monitor's history list (empty: client sends no headers).
+                                "session_id": pending.get("session_id", ""),
+                                "session_name": pending.get("session_name", ""),
+                                "root_session": pending.get("root_session", ""),
+                                "agent": pending.get("agent", ""),
                                 "prompt_tokens": seen, "reused": last.get("reused"), "output_tokens": n,
                                 # the request's whole prompt, and the tokens read of it (None: an older engine)
                                 "prompt_total": len(ids), "prompt_read": last.get("prompt_read"),
@@ -6530,8 +6542,8 @@ def make_handler(svc: Service):
                          ".svg": "image/svg+xml", ".html": "text/html; charset=utf-8"}
                 allowed = {"modules/alpine.js", "modules/chat.js", "modules/fields.js", "modules/format.js", "modules/images.js",
                            "modules/markdown.js", "modules/mcp.js", "modules/models.js", "modules/monitor.js",
-                           "modules/runtime.js", "modules/sampling.js", "modules/settings.js",
-                           "modules/store.js", "modules/swipe.js", "vendor/alpine.min.js"}
+                           "modules/runtime.js", "modules/sampling.js", "modules/session-status.js", "modules/sessions.js",
+                           "modules/settings.js", "modules/store.js", "modules/swipe.js", "vendor/alpine.min.js"}
                 f = ROOT / "serve" / "web" / name
                 ext = os.path.splitext(name)[1]
                 if "\\" in name or ".." in name or ("/" in name and name not in allowed) or ext not in types or not f.is_file():

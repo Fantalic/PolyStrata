@@ -105,68 +105,61 @@
   <!-- ============================ Monitor ============================ -->
   <section class="view view--monitor" id="view-monitor" role="tabpanel" aria-labelledby="tab-btn-monitor" :hidden="tab !== 'monitor'">
     <div class="monitor">
-      <div class="st-card state-card">
-        <div class="state-card__head">
-          <span class="card-title">Model state</span>
-          <span class="badges" id="state-badges">
-            <span class="st-badge" data-s="idle">Idle</span>
-            <span class="st-badge st-badge--reading" data-s="reading">Reading</span>
-            <span class="st-badge st-badge--generating" data-s="generating">Generating</span>
-            <span class="st-badge st-badge--queued" data-s="queued">Queued</span>
-            <span class="st-badge st-badge--error" data-s="error">Error</span>
-          </span>
-          <a href="web/local-context-debug.html" id="lc-debug-link" style="color:inherit;text-decoration:none;flex-shrink:0"><button id="lc-debug" style="font-size:12px;padding:4px 10px;border-radius:7px;cursor:pointer;color:inherit;background:var(--st-surface-2);border:1px solid var(--st-line)">Context debug <span id="lc-badge" class="st-badge" style="margin-left:4px;display:none">0</span></button></a>
-        </div>
-        <div class="state-card__row"><span id="state-label">Waiting for a request</span><span class="muted" id="state-detail"></span></div>
-        <div class="st-progress" id="state-progress"><div class="st-progress__bar" id="state-bar" style="width:0%"></div></div>
-      </div>
-
-      <div class="st-card queue-card" id="queue-card" hidden>
-        <div class="queue-head">
-          <span class="card-title">Request queue</span>
-          <div class="queue-controls">
-            <button class="st-btn st-btn--icon" id="queue-skip" disabled aria-label="Skip wait (break the hold/focus once)">
-              <svg class="st-icon"><use href="web/sprite.svg#i-skip"/></svg>
-            </button>
-            <button class="st-btn st-btn--icon" id="queue-pause" hidden aria-label="Pause queue">
-              <svg class="st-icon"><use href="web/sprite.svg#i-pause"/></svg>
-            </button>
-            <button class="st-btn st-btn--icon" id="queue-play" hidden aria-label="Resume queue">
-              <svg class="st-icon"><use href="web/sprite.svg#i-play"/></svg>
-            </button>
-            <button class="st-btn st-btn--icon queue-expand-btn" id="queue-expand" aria-expanded="false" aria-label="Expand queue">
-              <svg class="st-icon"><use href="web/sprite.svg#i-chevron"/></svg>
-            </button>
+      <div class="monitor-top">
+        <div class="st-card queue-card sessions-card" id="queue-card">
+          <div class="queue-head sessions-head">
+            <span class="card-title">Sessions</span>
+            <span class="badges" id="state-badges">
+              <span class="st-badge" data-s="idle">Idle</span>
+              <span class="st-badge st-badge--reading" data-s="reading">Reading</span>
+              <span class="st-badge st-badge--generating" data-s="generating">Generating</span>
+              <span class="st-badge st-badge--queued" data-s="queued">Queued</span>
+              <span class="st-badge st-badge--error" data-s="error">Error</span>
+            </span>
+            <div class="queue-controls">
+              <button class="st-btn st-btn--secondary queue-control" id="queue-skip" type="button" disabled>Skip wait</button>
+              <button class="st-btn st-btn--secondary queue-control" id="queue-pause" type="button" hidden>Pause queue</button>
+              <button class="st-btn st-btn--primary queue-control" id="queue-play" type="button" hidden>Resume queue</button>
+            </div>
           </div>
-        </div>
 
-        <!-- Collapsed summary (always visible when queue card is shown) -->
-        <div class="queue-collapsed" id="queue-collapsed">
-          <span class="queue-collapsed__text" id="queue-collapsed-text">No active session</span>
-        </div>
+          <!-- The active request stays pinned at the top; monitor.js owns its progress bar. -->
+          <div class="session-active" id="session-active">
+            <div class="session-active__row">
+              <span class="st-badge" id="session-active-badge">Idle</span>
+              <strong id="state-label">Waiting for a request</strong>
+              <span class="muted" id="state-detail"></span>
+              <span class="muted small session-active__id" id="session-active-id"></span>
+            </div>
+            <div class="st-progress" id="state-progress"><div class="st-progress__bar" id="state-bar" style="width:0%"></div></div>
+          </div>
 
-        <!-- Expanded body (hidden until user clicks the chevron) -->
-        <div class="queue-expanded" id="queue-expanded" hidden>
-          <p class="muted small" id="queue-state"></p>
-          <div class="queue-expanded-settings">
+          <!-- sessions.js fills this with session rows; no placeholder, so an empty list takes no space. -->
+          <div class="session-list" id="session-list" aria-live="polite"></div>
+
+          <!-- The waiting-requests table stays visible; its controls and status live in the footer below it. -->
+          <div class="queue-expanded" id="queue-expanded">
+            <div class="table-wrap">
+              <table class="st-table">
+                <thead><tr><th>Arrived</th><th class="num">Tokens</th><th>State</th><th>Session</th><th>Endpoint</th><th></th></tr></thead>
+                <tbody id="queue-rows"><tr data-placeholder><td colspan="6" class="muted">No requests waiting</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- One footer row under the table: history, queue controls, context debug and status. -->
+          <div class="sessions-foot">
+            <button class="st-btn st-btn--secondary" id="sessions-history-toggle" type="button" aria-expanded="false">Show history</button>
             <label class="muted small"><input type="checkbox" id="queue-aff"> Affinity</label>
             <label class="muted small">Hold <input class="st-input queue-hold" id="queue-hold" type="number" min="0" max="600" step="1" aria-label="Hold seconds"> s</label>
-          </div>
-          <div class="table-wrap">
-            <table class="st-table">
-              <thead><tr><th>Arrived</th><th class="num">Tokens</th><th>State</th><th>Session</th><th>Endpoint</th><th></th></tr></thead>
-              <tbody id="queue-rows"><tr><td colspan="7" class="muted">No requests waiting</td></tr></tbody>
-            </table>
+            <a href="web/local-context-debug.html" id="lc-debug-link" style="color:inherit;text-decoration:none;flex-shrink:0"><button id="lc-debug" style="font-size:12px;padding:4px 10px;border-radius:7px;cursor:pointer;color:inherit;background:var(--st-surface-2);border:1px solid var(--st-line)">Context debug <span id="lc-badge" class="st-badge" style="margin-left:4px;display:none">0</span></button></a>
+            <span class="muted small queue-collapsed__text" id="queue-collapsed-text">No active session</span>
+            <span class="muted small" id="queue-state"></span>
+            <span class="muted small" id="queue-note" role="status"></span>
           </div>
         </div>
-      </div>
 
-      <div class="metrics" id="metrics">
-        <!-- filled by app.js: Speed, GPU load, VRAM, GPU temp, Power, PCIe, CPU, Disk read -->
-      </div>
-
-      <div class="monitor-row">
-        <div class="st-card ctx-card">
+        <div class="st-card ctx-card" id="ctx-card">
           <span class="card-title">Context fill</span>
           <div class="ctx-gauge">
             <svg class="st-gauge" viewBox="0 0 120 120" aria-hidden="true">
@@ -184,18 +177,23 @@
           <div class="bar-row"><span>GPU temperature</span><span class="muted" id="temp-text">&ndash;</span></div>
           <div class="st-progress" data-tone="warn"><div class="st-progress__bar" id="temp-bar" style="width:0%"></div></div>
         </div>
-        <div class="st-card req-card">
-          <div class="req-head"><span class="card-title">Recent requests</span>
-            <button class="st-btn st-btn--secondary" id="req-all" hidden>Show all</button></div>
-          <div class="table-wrap" id="req-wrap">
-            <table class="st-table">
-              <thead><tr><th>Time</th><th>Status</th><th class="num">Prompt</th><th class="num">Reused</th><th class="num">Output</th>
-                <th class="num" title="New prompt tokens per second, excluding reused cache tokens (engine prompt time)">Prefill t/s</th><th class="num">Decode t/s</th><th class="num" title="While writing the answer: the share of the experts looked up that were already in VRAM. Experts the GPU read over PCIe (--pcie-frac) are not counted in it; their share of all routed experts is shown after it (+N% PCIe)">VRAM hit rate</th><th class="num">Duration</th></tr></thead>
-              <tbody id="req-body"><tr><td colspan="9" class="muted">No requests yet</td></tr></tbody>
-            </table>
-          </div>
-          <p class="muted req-totals" id="req-totals"></p>
+      </div>
+
+      <div class="metrics" id="metrics">
+        <!-- filled by app.js: Speed, GPU load, VRAM, GPU temp, Power, PCIe, CPU, Disk read -->
+      </div>
+
+      <div class="st-card req-card">
+        <div class="req-head"><span class="card-title">Recent requests</span>
+          <button class="st-btn st-btn--secondary" id="req-all" hidden>Show all</button></div>
+        <div class="table-wrap" id="req-wrap">
+          <table class="st-table">
+            <thead><tr><th>Time</th><th>Status</th><th class="num">Prompt</th><th class="num">Reused</th><th class="num">Output</th>
+              <th class="num" title="New prompt tokens per second, excluding reused cache tokens (engine prompt time)">Prefill t/s</th><th class="num">Decode t/s</th><th class="num" title="While writing the answer: the share of the experts looked up that were already in VRAM. Experts the GPU read over PCIe (--pcie-frac) are not counted in it; their share of all routed experts is shown after it (+N% PCIe)">VRAM hit rate</th><th class="num">Duration</th></tr></thead>
+            <tbody id="req-body"><tr><td colspan="9" class="muted">No requests yet</td></tr></tbody>
+          </table>
         </div>
+        <p class="muted req-totals" id="req-totals"></p>
       </div>
 
       <div class="st-card cc-card" id="cc-card">

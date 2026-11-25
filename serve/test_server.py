@@ -3559,12 +3559,27 @@ class WebApp(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn("text/html", ctype)
         self.assertIn(b"\"web/app.js\"", body)   # relative since #82 (works behind a path-prefixed proxy)
-        for path, want in (("/web/app.js", "javascript"), ("/web/modules/runtime.js", "javascript"), ("/web/modules/alpine.js", "javascript"), ("/web/modules/chat.js", "javascript"), ("/web/vendor/alpine.min.js", "javascript"), ("/web/app.css", "text/css"), ("/web/tokens.css", "text/css"),
+        for path, want in (("/web/app.js", "javascript"), ("/web/modules/runtime.js", "javascript"), ("/web/modules/alpine.js", "javascript"), ("/web/modules/chat.js", "javascript"), ("/web/modules/sessions.js", "javascript"), ("/web/modules/session-status.js", "javascript"), ("/web/vendor/alpine.min.js", "javascript"), ("/web/app.css", "text/css"), ("/web/tokens.css", "text/css"),
                            ("/web/components.css", "text/css"), ("/web/sprite.svg", "image/svg+xml")):
             with self.subTest(path=path):
                 code, ctype, _ = self.get(path)
                 self.assertEqual(code, 200)
                 self.assertIn(want, ctype)
+
+    def test_metrics_keeps_session_identity(self):
+        body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "track me"}],
+                           "max_tokens": 5}).encode()
+        headers = {"Content-Type": "application/json", "X-Session-Id": "session-42",
+                   "X-Root-Session": "root-7", "X-Agent": "monitor-test"}
+        req = urllib.request.Request(self.base + "/v1/chat/completions", data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+        _, _, raw = self.get("/metrics")
+        metrics = json.loads(raw)
+        for key, want in (("session_id", "session-42"), ("session_name", "track me"),
+                          ("root_session", "root-7"), ("agent", "monitor-test")):
+            self.assertEqual(metrics["live"][key], want)
+            self.assertEqual(metrics["requests"][0][key], want)
 
     def test_web_path_traversal_is_blocked(self):
         # the crucial part of the old "only the app files are served" test: a crafted
