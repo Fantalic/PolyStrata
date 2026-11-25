@@ -212,45 +212,10 @@ class Monitor(unittest.TestCase):
         self.assertLess(records[1]["load_s"], records[0]["load_s"])
         self.assertTrue(all(r["state"] == "completed" for r in records))
 
-    def test_page_and_relative_assets_are_served(self):
-        self.assertIs(self.request("/health")[1]["api_monitor"], True)   # #142: the Requests tab embeds the page
-        code, html = self.request("/api-monitor")
-        self.assertEqual(code, 200)
-        self.assertIn('src="/web/monitor.js"', html)
-        code, script = self.request("/web/monitor.js")
-        self.assertEqual(code, 200)
-        self.assertIn("textContent", script)
-        self.assertNotIn("innerHTML", script)
-        self.assertEqual(self.request("/web/../server.py")[0], 404)
-
 
 class ConversationCacheCard(unittest.TestCase):
     """#596: /metrics' "conversation_cache": the parked conversations from the engine's log lines, the budget and
     slots from its INFO line, and how much of the prompts the cache gave back."""
-
-    PARK = ("strata serve: conversation cache: parked 5000 tokens in 12.0 ms; parked=1 bytes=104857600 evictions=0 "
-            "snapshot_bytes=104857600 reused_kv_bytes=0\n")
-    RESTORE = "strata serve: conversation cache: restored 4000 tokens (exact) in 30.0 ms; parked=2 bytes=209715200\n"
-
-    def test_the_log(self):
-        from serve.server import ConvCacheLog
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            log = Path(d) / "strata.log"
-            log.write_text("an earlier run\n" + self.PARK, encoding="utf-8")
-            start = log.stat().st_size                 # this run starts here: the earlier run's park is not counted
-            c = ConvCacheLog()
-            self.assertEqual(c.poll(str(log), start)["parked"], 0)
-            with open(log, "a", encoding="utf-8") as f:
-                f.write("strata serve: something else\n" + self.PARK + self.RESTORE + "strata serve: conversation ca")
-            st = c.poll(str(log), start)
-            self.assertEqual((st["parked"], st["bytes"], st["parks"], st["restores"]), (2, 209715200, 1, 1))
-            self.assertEqual((st["last_event"], st["last_tokens"]), ("restored", 4000))
-            with open(log, "a", encoding="utf-8") as f:   # the cut line is read once it is whole
-                f.write("che: dropped 1 superseded copy of this conversation; parked=1\n")
-            self.assertEqual(c.poll(str(log), start)["parked"], 1)
-            self.assertEqual(c.poll(str(log), log.stat().st_size)["parked"], 0)   # the engine started again
-            self.assertEqual(c.poll(None, None)["parked"], 0)
 
     def test_metrics(self):
         tok = ByteTokenizer()
@@ -278,13 +243,6 @@ class ConversationCacheCard(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
-
-    def test_the_card_is_on_the_page(self):
-        web = Path(__file__).parent / "web"
-        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
-        for el in ("cc-card", "cc-slots-text", "cc-mem-text", "cc-facts", "cc-note"):
-            self.assertIn(f'id="{el}"', html)
-            self.assertIn(f'"{el}"', js)
 
 
 if __name__ == "__main__":

@@ -6524,12 +6524,17 @@ def make_handler(svc: Service):
                 return
             if path.startswith("/web/"):
                 # the web app's own files (serve/web): styles, script, icon sprite - same origin, no CDN
+                # ES modules live in one subdirectory; only the known files are served from there.
                 name = path[len("/web/"):]
                 types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                          ".svg": "image/svg+xml", ".html": "text/html; charset=utf-8"}
+                allowed = {"modules/alpine.js", "modules/chat.js", "modules/fields.js", "modules/format.js", "modules/images.js",
+                           "modules/markdown.js", "modules/mcp.js", "modules/models.js", "modules/monitor.js",
+                           "modules/runtime.js", "modules/sampling.js", "modules/settings.js",
+                           "modules/store.js", "modules/swipe.js", "vendor/alpine.min.js"}
                 f = ROOT / "serve" / "web" / name
                 ext = os.path.splitext(name)[1]
-                if "/" in name or "\\" in name or ext not in types or not f.is_file():
+                if "\\" in name or ".." in name or ("/" in name and name not in allowed) or ext not in types or not f.is_file():
                     self._json(404, {"error": {"message": "not found"}})
                     return
                 body = f.read_bytes()
