@@ -1,5 +1,7 @@
 ﻿/* PolyStrata web app - layout on top of tokens.css + components.css (the PolyStrata UI kit). Colours, type, radii and
    shadows come only from the kit's tokens. */
+/* Alpine removes x-cloak once the shared state is ready; until then the body stays hidden. */
+[x-cloak] { display: none !important; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body { display: flex; flex-direction: column; overflow: hidden; }

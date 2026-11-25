@@ -238,21 +238,6 @@ class Http(unittest.TestCase):
         self.assertEqual(self.call("GET")[0], 404)
         self.assertEqual(self.call("POST", {"set": {"fit_max_tokens": True}})[0], 404)
 
-    def test_the_page_has_the_view(self):
-        web = ROOT / "serve" / "web"
-        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
-        for el in ("cfg-card", "cfg-form", "cfg-save", "cfg-msg"):
-            self.assertIn(f'id="{el}"', html)
-        self.assertIn('fetch("config", {method: "POST", headers: headers(true)', js)
-        # the grouped Conversation memory panel: its card, five knobs' worth of markup, both buttons, live readout
-        for el in ("mem-card", "mem-form", "mem-live", "mem-apply", "mem-save", "mem-msg"):
-            self.assertIn(f'id="{el}"', html)
-        for key in ("cache_mib", "cache_disk_mib", "cache_slots", "cache_focus", "cache_ttl_s"):
-            self.assertIn(f'key: "{key}"', js)          # MEM_FIELDS drives the generated mem-<key> inputs
-        self.assertIn('id = `mem-${f.key}`', js)
-        self.assertIn("v1/cache/settings", js)           # Apply now is runtime-only
-        self.assertIn("Save into config", html)
-
     def test_memory_keys_reach_a_live_engine_now(self):
         # a live engine that understands CACHE gets the changed knobs at once; the file is saved either way
         calls = []

@@ -17,33 +17,33 @@
   } catch (e) {}
 </script>
 </head>
-<body>
+<body x-data="poly" x-cloak>
 <header class="st-header">
   <span class="st-header__brand">PolyStrata</span>
   <nav class="st-tabs" role="tablist" aria-label="Views">
-    <button class="st-tab" role="tab" id="tab-btn-chat" aria-controls="view-chat" aria-selected="true" data-tab="chat">
+    <button class="st-tab" role="tab" id="tab-btn-chat" aria-controls="view-chat" :aria-selected="tab === 'chat'" @click="showTab('chat')" data-tab="chat">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-chat"/></svg>Chat</button>
-    <button class="st-tab" role="tab" id="tab-btn-images" aria-controls="view-images" aria-selected="false" data-tab="images" hidden>
+    <button class="st-tab" role="tab" id="tab-btn-images" aria-controls="view-images" :aria-selected="tab === 'images'" @click="showTab('images')" :hidden="!imageTabVisible" data-tab="images">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-image"/></svg>Images</button>
-    <button class="st-tab" role="tab" id="tab-btn-monitor" aria-controls="view-monitor" aria-selected="false" data-tab="monitor">
+    <button class="st-tab" role="tab" id="tab-btn-monitor" aria-controls="view-monitor" :aria-selected="tab === 'monitor'" @click="showTab('monitor')" data-tab="monitor">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-activity"/></svg>Monitor</button>
-    <button class="st-tab" role="tab" id="tab-btn-models" aria-controls="view-models" aria-selected="false" data-tab="models">
+    <button class="st-tab" role="tab" id="tab-btn-models" aria-controls="view-models" :aria-selected="tab === 'models'" @click="showTab('models')" data-tab="models">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-settings"/></svg>Models</button>
-    <button class="st-tab" role="tab" id="tab-btn-requests" aria-controls="view-requests" aria-selected="false" data-tab="requests">
+    <button class="st-tab" role="tab" id="tab-btn-requests" aria-controls="view-requests" :aria-selected="tab === 'requests'" @click="showTab('requests')" data-tab="requests">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-layers"/></svg>Requests</button>
-    <button class="st-tab" role="tab" id="tab-btn-about" aria-controls="view-about" aria-selected="false" data-tab="about">
+    <button class="st-tab" role="tab" id="tab-btn-about" aria-controls="view-about" :aria-selected="tab === 'about'" @click="showTab('about')" data-tab="about">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-info"/></svg>About</button>
   </nav>
   <span class="st-header__spacer"></span>
   <span class="st-pill" id="pill" data-state="idle" role="status" aria-live="polite">
     <span class="st-pill__dot"></span><span id="pill-text">Connecting&hellip;</span></span>
-  <button class="st-btn st-btn--icon" id="theme-btn" title="Light / dark" aria-label="Switch between light and dark">
-    <svg class="st-icon"><use id="theme-icon" href="web/sprite.svg#i-moon"/></svg></button>
+  <button class="st-btn st-btn--icon" id="theme-btn" title="Light / dark" aria-label="Switch between light and dark" @click="toggleTheme()">
+    <svg class="st-icon"><use id="theme-icon" :href="sprite + '#i-' + (theme === 'dark' ? 'sun' : 'moon')"/></svg></button>
 </header>
 
 <main>
   <!-- ============================ Chat ============================ -->
-  <section class="view view--chat" id="view-chat" role="tabpanel" aria-labelledby="tab-btn-chat">
+  <section class="view view--chat" id="view-chat" role="tabpanel" aria-labelledby="tab-btn-chat" :hidden="tab !== 'chat'">
     <div class="chat-scroll" id="chat-scroll">
       <div class="chat" id="chat">
         <div class="chat-empty" id="chat-empty">
@@ -64,7 +64,7 @@
             <svg class="st-icon"><use href="web/sprite.svg#i-new-chat"/></svg></button>
           <button type="button" class="st-btn st-btn--icon" id="export-btn" title="Save this chat as Markdown" aria-label="Save this chat">
             <svg class="st-icon"><use href="web/sprite.svg#i-download"/></svg></button>
-          <button type="button" class="st-btn st-btn--icon" id="sampling-btn" title="Sampling and thinking" aria-label="Sampling and thinking">
+          <button type="button" class="st-btn st-btn--icon" id="sampling-btn" title="Sampling and thinking" aria-label="Sampling and thinking" @click="openDrawer(true)">
             <svg class="st-icon"><use href="web/sprite.svg#i-settings"/></svg></button>
           <span class="spacer"></span>
           <span class="composer-hint" id="composer-hint"></span>
@@ -78,28 +78,32 @@
   </section>
 
   <!-- ============================ Images ============================ -->
-  <section class="view view--images" id="view-images" role="tabpanel" aria-labelledby="tab-btn-images" hidden>
+  <section class="view view--images" id="view-images" role="tabpanel" aria-labelledby="tab-btn-images" :hidden="tab !== 'images'">
     <div class="about">
-      <form class="st-card img-form" id="img-form">
+      <form class="st-card img-form" id="img-form" @submit.prevent="generateImage()">
         <span class="card-title" id="img-title">Make an image</span>
-        <textarea class="st-input img-prompt" id="img-prompt" rows="3" placeholder="Describe the image&hellip;" aria-label="Prompt"></textarea>
+        <textarea class="st-input img-prompt" id="img-prompt" rows="3" placeholder="Describe the image&hellip;" aria-label="Prompt" x-model="image.prompt"></textarea>
         <div class="img-row">
           <label class="st-field">Size
-            <select class="st-input" id="img-size">
+            <select class="st-input" id="img-size" x-model="image.size">
               <option>1024x1024</option><option>1536x1024</option><option>1024x1536</option>
               <option>768x768</option><option>512x512</option></select></label>
           <label class="st-field">Seed
-            <input class="st-input" id="img-seed" type="number" min="0" placeholder="random"></label>
-          <button type="submit" class="st-btn st-btn--primary" id="img-go">Generate</button>
+            <input class="st-input" id="img-seed" type="number" min="0" placeholder="random" x-model="image.seed"></label>
+          <button type="submit" class="st-btn st-btn--primary" id="img-go" :disabled="image.busy">Generate</button>
         </div>
-        <span class="composer-hint" id="img-hint">One image at a time; a chat request waits for it (and the other way round).</span>
+        <span class="composer-hint" id="img-hint" x-text="image.hint">One image at a time; a chat request waits for it (and the other way round).</span>
       </form>
-      <div class="img-results" id="img-results"></div>
+      <div class="img-results" id="img-results">
+        <template x-for="r in image.results" :key="r.id">
+          <figure><img :src="r.src" :alt="r.alt"><figcaption x-text="r.caption"></figcaption></figure>
+        </template>
+      </div>
     </div>
   </section>
 
   <!-- ============================ Monitor ============================ -->
-  <section class="view view--monitor" id="view-monitor" role="tabpanel" aria-labelledby="tab-btn-monitor" hidden>
+  <section class="view view--monitor" id="view-monitor" role="tabpanel" aria-labelledby="tab-btn-monitor" :hidden="tab !== 'monitor'">
     <div class="monitor">
       <div class="st-card state-card">
         <div class="state-card__head">
@@ -207,9 +211,19 @@
         <p class="muted small cc-note" id="cc-note"></p>
       </div>
 
-      <div class="st-card mcp-card" id="mcp-card" hidden>
-        <div class="req-head"><span class="card-title">MCP servers</span><span class="muted small" id="mcp-sum"></span></div>
-        <div class="mcp-list" id="mcp-list"></div>
+      <div class="st-card mcp-card" id="mcp-card" :hidden="mcpCardHidden">
+        <div class="req-head"><span class="card-title">MCP servers</span><span class="muted small" id="mcp-sum" x-text="mcpSummary"></span></div>
+        <div class="mcp-list" id="mcp-list">
+          <template x-for="s in mcpServers" :key="s.name">
+            <div class="mcp-server"><div class="mcp-server__head"><span class="st-badge" :class="s.badgeClass" x-text="s.badgeText"></span>
+              <strong x-text="s.name"></strong><span class="muted small" x-text="s.transport + ' · ' + s.toolsCount + ' tools' + s.info"></span></div>
+              <div class="msg-error" x-show="s.error" x-text="s.error"></div>
+              <div class="mcp-server__tools" x-show="s.tools.length">
+                <template x-for="t in s.tools" :key="t.name"><span class="chip" :title="t.description" x-text="t.name"></span></template>
+              </div>
+            </div>
+          </template>
+        </div>
         <p class="muted small mcp-note">Their tools run on this PC with your rights, when the model decides to call them
           (in this page's chat only; switch it off in Sampling).</p>
       </div>
@@ -217,7 +231,7 @@
   </section>
 
   <!-- ============================ Requests ============================ -->
-  <section class="view view--requests" id="view-requests" role="tabpanel" aria-labelledby="tab-btn-requests" hidden>
+  <section class="view view--requests" id="view-requests" role="tabpanel" aria-labelledby="tab-btn-requests" :hidden="tab !== 'requests'">
     <iframe class="requests-frame" id="requests-frame" title="API monitor" hidden></iframe>
     <div class="about" id="requests-off" hidden>
       <div class="st-card">
@@ -231,37 +245,38 @@
 
   <!-- ============================ About ============================ -->
   <!-- ============================ Models ============================ -->
-  <section class="view view--models" id="view-models" role="tabpanel" aria-labelledby="tab-btn-models" hidden>
+  <section class="view view--models" id="view-models" role="tabpanel" aria-labelledby="tab-btn-models" :hidden="tab !== 'models'">
     <div class="models">
       <div class="st-card">
         <span class="card-title">Model</span>
         <p class="muted small">One model is in memory at a time. Switching stops the current one first.</p>
-        <select class="model-select model-select--full" id="model-select" title="The model that answers. One is in memory at a time." aria-label="Model"></select>
+        <select class="model-select model-select--full" id="model-select" title="The model that answers. One is in memory at a time." aria-label="Model" x-model="currentModelId" @change="switchModel()" :disabled="modelSelectDisabled">
+          <template x-for="m in models" :key="m.id"><option :value="m.id" :disabled="m.disabled" x-text="m.label"></option></template>
+        </select>
         <div class="st-field">
           <label class="st-label" for="context-select">Context window</label>
           <div class="context-row">
-            <select class="st-input" id="context-select" aria-label="Context window">
-              <option value="8192">8K</option>
-              <option value="16384">16K</option>
-              <option value="32768">32K</option>
-              <option value="65536">64K</option>
-              <option value="98304">96K</option>
-              <option value="131072">128K</option>
-              <option value="196608">192K</option>
-              <option value="262144">256K</option>
+            <select class="st-input" id="context-select" aria-label="Context window" x-model="contextValue">
+              <template x-for="o in contextOptions" :key="o.value"><option :value="o.value" x-text="o.label"></option></template>
             </select>
             <button class="st-btn st-btn--primary" id="ctx-restart" type="button">Save &amp; restart</button>
-            <button class="st-btn" id="vision-toggle" type="button" hidden>Vision: <span id="vision-status">on</span></button>
-            <button class="st-btn" id="kv-resident-toggle" type="button" hidden>KV resident: <span id="kv-resident-status">off</span></button>
+            <button class="st-btn" id="vision-toggle" type="button" :hidden="!vision.present" :disabled="!vision.elastic" :title="vision.elastic ? (vision.running ? 'The image encoder is running; it stops by itself when idle.' : 'The image encoder is down; a picture (or switching on) starts it.') : 'This config runs the vision encoder always-on. Start with tall-vision to toggle it.'" @click="toggleVision()">Vision: <span id="vision-status" x-text="vision.enabled ? 'on' : 'off'"></span></button>
+            <button class="st-btn" id="kv-resident-toggle" type="button" :hidden="!kv.present" @click="toggleKv()">KV resident: <span id="kv-resident-status" x-text="kv.enabled ? 'on' : 'off'"></span></button>
           </div>
           <span class="muted small">The model restarts with this window. A shorter window is faster; a longer one holds more history.</span>
-          <span class="muted small" id="kv-resident-note" hidden>Keeps the newest 16384 attention rows in VRAM and streams the rest from RAM in 4-bit. Frees VRAM at long contexts (384K context runs on an 8 GB card), but decodes about three times slower when the context is full (measured 12.1 vs 35.0 tok/s at a 258K prompt on a 3060 Ti; the all-resident q8_0 path is the faster choice at 262K). Off = the default path, byte-identical. From PR #180 by lepotane.</span>
+          <span class="muted small" id="kv-resident-note" :hidden="!kv.present">Keeps the newest 16384 attention rows in VRAM and streams the rest from RAM in 4-bit. Frees VRAM at long contexts (384K context runs on an 8 GB card), but decodes about three times slower when the context is full (measured 12.1 vs 35.0 tok/s at a 258K prompt on a 3060 Ti; the all-resident q8_0 path is the faster choice at 262K). Off = the default path, byte-identical. From PR #180 by lepotane.</span>
         </div>
       </div>
       <div class="st-card mem-card" id="mem-card" hidden>
         <div class="req-head"><span class="card-title">Conversation memory</span><span class="muted small" id="mem-live" role="status"></span></div>
         <p class="muted small">How the engine keeps earlier chats ready, so returning to one does not read its whole prompt again. Each <span class="mem-help-demo">?</span> explains a setting. <strong>Apply now</strong> changes only this running engine; <strong>Save into config</strong> also keeps the values for every start.</p>
-        <div class="mem-form" id="mem-form"></div>
+        <div class="mem-form" id="mem-form">
+          <template x-for="row in memRows" :key="row.key">
+            <div class="mem-row"><div class="mem-row__label"><label :for="row.id" x-text="row.name"></label>
+              <span class="st-help" tabindex="0" role="button" :aria-label="'About ' + row.name" :aria-describedby="row.tipId">?<span class="st-tip" :id="row.tipId" role="tooltip"><b x-text="row.name"></b><span x-text="row.what"></span><p x-text="row.does"></p><p class="tip-eg" x-text="row.eg"></p></span></span>
+            </div><div><input class="st-input" :id="row.id" :type="row.auto ? 'text' : 'number'" min="0" x-model="row.value" :placeholder="row.placeholder" autocomplete="off" spellcheck="false"><div class="mem-row__eg" x-text="row.hint"></div></div></div>
+          </template>
+        </div>
         <div class="cfg-actions"><button class="st-btn" id="mem-apply" type="button">Apply now</button>
           <button class="st-btn st-btn--primary" id="mem-save" type="button">Save into config</button>
           <span class="muted small" id="mem-msg" role="status"></span></div>
@@ -269,7 +284,26 @@
       <div class="st-card cfg-card" id="cfg-card" hidden>
         <div class="req-head"><span class="card-title">Model settings</span><span class="muted small" id="cfg-file"></span></div>
         <p class="muted small">Kept in the model's run config for every client. A value marked <em>( default )</em> is what applies when the field is empty — type a value to change it. Each <span class="mem-help-demo">?</span> explains a setting. Context changes take effect on restart.</p>
-        <form class="cfg-form" id="cfg-form"></form>
+        <form class="cfg-form" id="cfg-form">
+          <template x-for="row in cfgRows" :key="row.id">
+            <div class="cfg-row"><div class="cfg-row__label"><label :for="row.id" x-text="row.name"></label>
+              <span class="st-help" tabindex="0" role="button" :aria-label="'About ' + row.name" :aria-describedby="row.tipId">?<span class="st-tip" :id="row.tipId" role="tooltip"><b x-text="row.name"></b><span x-text="row.what"></span><p x-text="row.does"></p><p class="tip-eg" x-text="row.eg"></p></span></span>
+              <code x-text="row.key"></code></div>
+              <div class="cfg-row__control">
+                <template x-if="row.choices">
+                  <select class="st-input" :id="row.id" x-model="row.value">
+                    <option value="" x-text="row.blankLabel"></option>
+                    <template x-for="opt in row.choices" :key="opt.value"><option :value="opt.value" x-text="opt.label"></option></template>
+                  </select>
+                </template>
+                <template x-if="!row.choices">
+                  <input class="st-input" :id="row.id" :type="row.kind === 'number' ? 'number' : 'text'" :step="row.kind === 'number' ? 'any' : null" min="0" x-model="row.value" :placeholder="row.placeholder" autocomplete="off">
+                </template>
+                <div class="cfg-hint" x-text="row.hint"></div>
+              </div>
+            </div>
+          </template>
+        </form>
         <div class="cfg-actions"><button class="st-btn st-btn--primary" id="cfg-save" type="button">Save</button>
           <button class="st-btn" id="cfg-restart" type="button">Save &amp; restart model</button>
           <span class="muted small" id="cfg-msg" role="status"></span></div>
@@ -277,7 +311,7 @@
     </div>
   </section>
 
-  <section class="view view--about" id="view-about" role="tabpanel" aria-labelledby="tab-btn-about" hidden>
+  <section class="view view--about" id="view-about" role="tabpanel" aria-labelledby="tab-btn-about" :hidden="tab !== 'about'">
     <div class="about">
       <div class="st-card">
         <span class="card-title">Model and engine</span>
@@ -296,10 +330,10 @@
         <span class="card-title">Settings</span>
         <div class="st-field">
           <label class="st-label" for="api-key">API key <output>only if the server was started with one</output></label>
-          <input class="st-input" id="api-key" type="password" autocomplete="off" placeholder="Not needed">
+          <input class="st-input" id="api-key" type="password" autocomplete="off" placeholder="Not needed" x-model="apiKey" @change="saveApiKey()">
         </div>
         <div class="toggle-row"><span>Dark theme</span>
-          <button class="st-toggle" id="dark-toggle" role="switch" aria-checked="false" aria-label="Dark theme"></button></div>
+          <button class="st-toggle" id="dark-toggle" role="switch" :aria-checked="theme === 'dark'" @click="toggleTheme()" aria-label="Dark theme"></button></div>
         <p class="muted small">Chats, settings and the key are kept in this browser only.
           <a href="https://github.com/VecSzn/PolyStrata" target="_blank" rel="noopener noreferrer">PolyStrata on GitHub</a></p>
       </div>
@@ -308,58 +342,58 @@
 </main>
 
 <!-- ============================ Sampling drawer ============================ -->
-<aside class="st-drawer" id="drawer" data-open="false" aria-label="Sampling and thinking" aria-hidden="true">
+<aside class="st-drawer" id="drawer" :data-open="drawer.open ? 'true' : 'false'" :aria-hidden="!drawer.open" aria-label="Sampling and thinking">
   <div class="st-drawer__head"><span class="card-title">Sampling</span>
-    <button class="st-btn st-btn--icon" id="drawer-close" aria-label="Close">
+    <button class="st-btn st-btn--icon" id="drawer-close" @click="closeDrawer()" aria-label="Close">
       <svg class="st-icon"><use href="web/sprite.svg#i-chevron"/></svg></button></div>
   <div class="st-drawer__body">
     <div class="st-field">
-      <label class="st-label" for="s-thinking">Thinking <output id="o-thinking"></output></label>
+      <label class="st-label" for="s-thinking">Thinking <output id="o-thinking" x-text="({none:'answers right away',low:'short',medium:'medium',high:'thorough (default)'})[drawer.draft.thinking] || ''"></output></label>
       <div class="seg" id="s-thinking" role="radiogroup" aria-label="Thinking">
-        <button type="button" role="radio" data-v="none">Off</button><button type="button" role="radio" data-v="low">Low</button>
-        <button type="button" role="radio" data-v="medium">Medium</button><button type="button" role="radio" data-v="high">High</button>
+        <button type="button" role="radio" :aria-checked="drawer.draft.thinking === 'none'" @click="drawer.draft.thinking = 'none'">Off</button><button type="button" role="radio" :aria-checked="drawer.draft.thinking === 'low'" @click="drawer.draft.thinking = 'low'">Low</button>
+        <button type="button" role="radio" :aria-checked="drawer.draft.thinking === 'medium'" @click="drawer.draft.thinking = 'medium'">Medium</button><button type="button" role="radio" :aria-checked="drawer.draft.thinking === 'high'" @click="drawer.draft.thinking = 'high'">High</button>
       </div>
     </div>
     <div class="st-field">
-      <label class="st-label" for="s-temp">Temperature <output id="o-temp"></output></label>
-      <input class="st-slider" type="range" id="s-temp" min="0" max="1.5" step="0.05">
+      <label class="st-label" for="s-temp">Temperature <output id="o-temp" x-text="+drawer.draft.temperature === 0 ? '0 · greedy' : (+drawer.draft.temperature).toFixed(2)"></output></label>
+      <input class="st-slider" type="range" id="s-temp" min="0" max="1.5" step="0.05" x-model.number="drawer.draft.temperature">
       <span class="muted small">0 = always the most likely word (exact, repeatable)</span>
     </div>
     <div class="st-field">
-      <label class="st-label" for="s-topp">Top-p <output id="o-topp"></output></label>
-      <input class="st-slider" type="range" id="s-topp" min="0.05" max="1" step="0.05">
+      <label class="st-label" for="s-topp">Top-p <output id="o-topp" x-text="(+drawer.draft.top_p).toFixed(2)"></output></label>
+      <input class="st-slider" type="range" id="s-topp" min="0.05" max="1" step="0.05" x-model.number="drawer.draft.top_p" :disabled="+drawer.draft.temperature === 0">
     </div>
     <div class="st-field">
-      <label class="st-label" for="s-topk">Top-k <output id="o-topk"></output></label>
-      <input class="st-slider" type="range" id="s-topk" min="1" max="64" step="1">
+      <label class="st-label" for="s-topk">Top-k <output id="o-topk" x-text="drawer.draft.top_k"></output></label>
+      <input class="st-slider" type="range" id="s-topk" min="1" max="64" step="1" x-model.number="drawer.draft.top_k" :disabled="+drawer.draft.temperature === 0">
     </div>
     <div class="st-field">
       <label class="st-label" for="s-max">Max tokens <output>empty = until done</output></label>
-      <input class="st-input" id="s-max" type="number" min="1" step="1" placeholder="Until done">
+      <input class="st-input" id="s-max" type="number" min="1" step="1" placeholder="Until done" x-model="drawer.draft.max">
     </div>
     <div class="st-field">
       <label class="st-label" for="s-seed">Seed <output>empty = random</output></label>
-      <input class="st-input" id="s-seed" type="number" min="1" step="1" placeholder="Random">
+      <input class="st-input" id="s-seed" type="number" min="1" step="1" placeholder="Random" x-model="drawer.draft.seed">
     </div>
     <div class="toggle-row"><span>Show thinking<br><span class="muted small">expanded while it streams</span></span>
-      <button class="st-toggle" id="s-show" role="switch" aria-checked="true" aria-label="Show thinking"></button></div>
-    <div class="toggle-row" id="mcp-row" hidden><span>Use tools from MCP servers<br><span class="muted small"
-      id="mcp-row-sub">the model may call them while it answers</span></span>
-      <button class="st-toggle" id="s-mcp" role="switch" aria-checked="true" aria-label="Use tools from MCP servers"></button></div>
-    <div class="toggle-row" id="esp-row" hidden><span>Experimental speed projection<br><span class="muted small">the
+      <button class="st-toggle" id="s-show" role="switch" :aria-checked="!!drawer.draft.show" @click="drawer.draft.show = !drawer.draft.show" aria-label="Show thinking"></button></div>
+    <div class="toggle-row" id="mcp-row" :hidden="!mcpServers.length"><span>Use tools from MCP servers<br><span class="muted small"
+      id="mcp-row-sub" x-text="mcpRowSub">the model may call them while it answers</span></span>
+      <button class="st-toggle" id="s-mcp" role="switch" :aria-checked="drawer.draft.mcp !== false" @click="drawer.draft.mcp = !drawer.draft.mcp" aria-label="Use tools from MCP servers"></button></div>
+    <div class="toggle-row" id="esp-row" :hidden="!drawer.espVisible"><span>Experimental speed projection<br><span class="muted small">the
       engine's control vector; off = the stock model. Switching reads the chat again once</span></span>
-      <button class="st-toggle" id="s-esp" role="switch" aria-checked="true" aria-label="Experimental speed projection"></button></div>
+      <button class="st-toggle" id="s-esp" role="switch" :aria-checked="drawer.draft.esp !== false" @click="drawer.draft.esp = !drawer.draft.esp" aria-label="Experimental speed projection"></button></div>
     <div class="toggle-row"><span>Use for other apps too<br><span class="muted small">omp and other API clients get
       these settings for anything they don't set themselves</span></span>
-      <button class="st-toggle" id="s-share" role="switch" aria-checked="false" aria-label="Use for other apps too"></button></div>
+      <button class="st-toggle" id="s-share" role="switch" :aria-checked="!!drawer.shared" @click="drawer.shared = !drawer.shared" aria-label="Use for other apps too"></button></div>
     <div class="drawer-actions">
-      <button class="st-btn st-btn--secondary" id="s-reset" type="button">Reset</button>
-      <button class="st-btn st-btn--primary" id="s-apply" type="button">Apply</button>
+      <button class="st-btn st-btn--secondary" id="s-reset" type="button" @click="resetSampling()">Reset</button>
+      <button class="st-btn st-btn--primary" id="s-apply" type="button" @click="applySampling()">Apply</button>
     </div>
   </div>
 </aside>
-<div class="scrim" id="scrim" hidden></div>
+<div class="scrim" id="scrim" :hidden="!drawer.open" @click="closeDrawer()"></div>
 <div class="st-toasts" id="toasts" aria-live="polite"></div>
-<script src="web/app.js"></script>
+<script type="module" src="web/app.js"></script>
 </body>
 </html>
