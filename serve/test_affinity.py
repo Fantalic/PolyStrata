@@ -96,6 +96,57 @@ class AffinityRules(unittest.TestCase):
         grown = a.register("a2", conv(1, 2, 3, 4, TURN_ID, 5))
         self.assertTrue(a.decide(grown))            # the turn checkpoint is a prefix of the next turn
 
+    def test_focus_session_with_no_queued_request_pins_the_next_turn(self):
+        """The monitor's 'hold this session' control: pin by session id while nothing is waiting."""
+        a = self.affinity(small_toks=0)
+        a.focus_session("ses_main")
+        follower = a.register("m2", conv(70, 71), session_id="ses_sub", root_session="ses_main")
+        foreign = a.register("b1", conv(80, 81), session_id="ses_other", root_session="ses_other")
+        self.assertTrue(a.decide(follower))          # a sub-agent under the pinned root runs at once
+        self.assertFalse(a.decide(foreign))          # another session waits with no timeout
+        time.sleep(0.05)
+        self.assertFalse(a.decide(foreign))
+        a.skip()
+        self.assertTrue(a.decide(foreign))           # Skip lets exactly one foreign turn through
+        a.unfocus()
+
+    def test_focus_session_accepts_a_member_session_id(self):
+        """Pinning by a sub-agent's own session id must match that root's follow-ups as well."""
+        a = self.affinity(small_toks=0)
+        a.focus_session("ses_sub1")
+        follower = a.register("m2", conv(70, 71), session_id="ses_sub2", root_session="ses_main")
+        # Only the member with that exact id matches; another root does not.
+        self.assertFalse(a.decide(follower))
+        a.unfocus()
+        a.focus_session("ses_main")
+        self.assertTrue(a.decide(follower))
+
+    def test_a_bundled_hold_still_continues_a_headerless_client(self):
+        """A real hold has a token prefix: a client without session headers still continues it."""
+        a = self.affinity(small_toks=0)
+        main = a.register("m1", conv(1, 2), session_id="ses_main", root_session="ses_main")
+        a.served(conv(1, 2), main)
+        loose = a.register("x1", conv(1, 2, 3))       # same tokens, no headers
+        self.assertTrue(a.decide(loose))
+        foreign = a.register("b1", conv(80, 81))
+        self.assertFalse(a.decide(foreign))
+
+    def test_focus_session_does_not_let_a_bundleless_request_through(self):
+        """A request without the plugin's session headers must not match a session pin by prefix."""
+        a = self.affinity(small_toks=0)
+        a.focus_session("ses_main")
+        loose = a.register("x1", conv(70, 71))       # no session headers: empty bundle
+        self.assertFalse(a.decide(loose))
+        with self.assertRaises(ValueError):
+            a.focus_session("")
+
+    def test_focus_id_still_works(self):
+        a = self.affinity(small_toks=0)
+        a1 = a.register("a1", conv(1, 2))
+        self.assertEqual(a.focus(a1.id)["focused"], a1.id)
+        with self.assertRaises(KeyError):
+            a.focus("no_such_id")
+
     # ---- session bundles (the plugin's headers) ------------------------
     def test_a_subagent_request_continues_its_main_session_bundle(self):
         """A sub-agent's first request shares the root session, not a token prefix: it counts as the

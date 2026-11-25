@@ -5710,6 +5710,7 @@ class Service:
                                 "session_name": pending.get("session_name", ""),
                                 "root_session": pending.get("root_session", ""),
                                 "agent": pending.get("agent", ""),
+                                "snippet": pending.get("snippet", ""),   # latest user input, for the Monitor's expandable session row
                                 "prompt_tokens": seen, "reused": last.get("reused"), "output_tokens": n,
                                 # the request's whole prompt, and the tokens read of it (None: an older engine)
                                 "prompt_total": len(ids), "prompt_read": last.get("prompt_read"),
@@ -6754,7 +6755,15 @@ def make_handler(svc: Service):
                                                          if k in req})
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/focus":
-                            self._json(200, {**svc.affinity.focus(req.get("id")), **svc.affinity.view()})
+                            # An id pins one waiting request; a session id pins the conversation
+                            # even when nothing is queued yet (its next follow-up runs first).
+                            if req.get("id"):
+                                result = svc.affinity.focus(req["id"])
+                            else:
+                                session = (req.get("session") or req.get("session_id")
+                                           or req.get("root_session") or req.get("bundle"))
+                                result = svc.affinity.focus_session(session, str(req.get("snippet") or ""))
+                            self._json(200, {**result, **svc.affinity.view()})
                         elif path == "/api/queue/skip":
                             svc.affinity.skip()
                             self._json(200, svc.affinity.view())
@@ -6783,6 +6792,8 @@ def make_handler(svc: Service):
                             self._json(404, {"error": {"message": "not found"}})
                     except KeyError:
                         self._json(404, {"error": {"message": "no waiting request with that id"}})
+                    except ValueError as e:
+                        self._json(400, {"error": {"message": str(e)}})
                     return
                 if path == "/api/vision":
                     if not self._own_page("vision can be switched on or off"):

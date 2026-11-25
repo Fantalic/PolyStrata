@@ -59,8 +59,16 @@ def _continues(prefix: list, bundle: str, e: "Entry") -> bool:
     With a session bundle (the plugin's headers) the match is by the root session id - a
     sub-agent's first request shares its main session's bundle without sharing a token prefix.
     Without bundles, by the engine's token checkpoint."""
-    if bundle and e.bundle:
-        return bundle == e.bundle
+    if bundle:
+        # A pinned session may be named by its root bundle or by any member's own id.
+        if e.bundle == bundle or e.root_session == bundle or e.session_id == bundle:
+            return True
+        if e.bundle:             # a different conversation: its own bundle wins over shared tokens
+            return False
+        # No session headers at all: fall back to the turn checkpoint. A session pin has no
+        # prefix, and an empty-prefix match would let every header-less request through.
+        if not prefix:
+            return False
     return _matches(prefix, e.ids)
 
 
@@ -335,6 +343,19 @@ class Affinity:
                             "id": entry.id, "snippet": entry.snippet}
             self.hold = None
             return {"focused": entry.id, "snippet": entry.snippet}
+
+    def focus_session(self, session: str, snippet: str = "") -> dict:
+        """Pin a session by its bundle id so its next turn runs first, without needing a queued
+        request.  A bundle id (root_session or session_id from the plugin headers) is enough to
+        match the follow-up: _continues compares bundles before token prefixes.  Requests without
+        a bundle cannot be mistaken for this session's continuation."""
+        session = str(session or "").strip()
+        if not session:
+            raise ValueError("session: a session id")
+        with self.lock:
+            self.focused = {"prefix": [], "bundle": session, "id": session, "snippet": snippet}
+            self.hold = None
+            return {"focused": session, "snippet": snippet}
 
     def unfocus(self) -> None:
         with self.lock:
