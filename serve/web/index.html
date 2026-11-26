@@ -117,18 +117,10 @@
             </div>
           </div>
 
-          <!-- The active request stays pinned at the top; monitor.js owns its progress bar. -->
-          <div class="session-active" id="session-active">
-            <div class="session-active__row">
-              <span class="st-badge" id="session-active-badge">Idle</span>
-              <strong id="state-label">Waiting for a request</strong>
-              <span class="muted" id="state-detail"></span>
-              <span class="muted small session-active__id" id="session-active-id"></span>
-            </div>
-            <div class="st-progress" id="state-progress"><div class="st-progress__bar" id="state-bar" style="width:0%"></div></div>
-          </div>
+          <!-- The active session stays pinned above the scrollable list; sessions.js owns its row and loading bar. -->
+          <div class="session-active" id="session-active" aria-live="polite"></div>
 
-          <!-- sessions.js fills this with session rows; no placeholder, so an empty list takes no space. -->
+          <!-- sessions.js fills this with Waiting, and Finished after Show history; no placeholder. -->
           <div class="session-list" id="session-list" aria-live="polite"></div>
 
 
@@ -323,6 +315,22 @@
     </div>
   </section>
 </main>
+
+<!-- Full latest input and session facts, opened from an expanded session row. -->
+<div class="session-detail-overlay" id="session-detail-overlay" hidden>
+  <div class="session-detail-overlay__scrim" data-session-detail-close></div>
+  <div class="session-detail-overlay__panel" role="dialog" aria-modal="true" aria-labelledby="sd-title">
+    <div class="session-detail-overlay__head">
+      <span class="card-title" id="sd-title">Session details</span>
+      <button class="st-btn st-btn--icon" id="sd-close" type="button" data-session-detail-close aria-label="Close details">✕</button>
+    </div>
+    <div class="session-detail-overlay__body">
+      <span class="muted small">Latest user input</span>
+      <pre class="session-detail-overlay__input" id="sd-input"></pre>
+      <dl class="session-detail-overlay__facts" id="sd-facts"></dl>
+    </div>
+  </div>
+</div>
 
 <!-- ============================ Sampling drawer ============================ -->
 <aside class="st-drawer" id="drawer" :data-open="drawer.open ? 'true' : 'false'" :aria-hidden="!drawer.open" aria-label="Sampling and thinking">

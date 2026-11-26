@@ -72,7 +72,7 @@ from serve.structured import StructuredOutputError, prepare_format, prepare_gram
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
-from serve.affinity import Affinity, first_user_snippet, last_user_snippet  # noqa: E402
+from serve.affinity import Affinity, first_user_snippet, last_user_input, last_user_snippet  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
@@ -4618,6 +4618,7 @@ class Service:
         agent = str(get("X-Agent") or "").strip()[:60]
         pending = {"id": uuid.uuid4().hex[:12], "path": path,
                    "snippet": last_user_snippet(req),
+                   "last_input": last_user_input(req),
                    "session_name": first_user_snippet(req) or last_user_snippet(req),
                    "session_id": session_id, "root_session": root_session, "agent": agent}
         self.request_trace.pending = pending
@@ -4685,7 +4686,9 @@ class Service:
                 "session_id": self.active_session.get("session_id", ""),
                 "session_name": self.active_session.get("session_name", ""),
                 "root_session": self.active_session.get("root_session", ""),
-                "agent": self.active_session.get("agent", "")}
+                "agent": self.active_session.get("agent", ""),
+                "snippet": self.active_session.get("snippet", ""),
+                "last_input": self.active_session.get("last_input", "")}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
         par = int(getattr(self.engine, "batch", 0) or 0)
@@ -5357,7 +5360,7 @@ class Service:
             entry = self.affinity.register(pending.get("id"), ids, pending.get("path", ""),
                                            pending.get("snippet", ""), pending.get("session_name", ""),
                                            pending.get("session_id", ""), pending.get("root_session", ""),
-                                           pending.get("agent", ""))
+                                           pending.get("agent", ""), pending.get("last_input", ""))
 
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
         # window (self.status says busy while any runs); one at a time they are self.status / self.rate, as before
@@ -5711,6 +5714,7 @@ class Service:
                                 "root_session": pending.get("root_session", ""),
                                 "agent": pending.get("agent", ""),
                                 "snippet": pending.get("snippet", ""),   # latest user input, for the Monitor's expandable session row
+                                "last_input": pending.get("last_input", ""),   # up to 4000 chars with line breaks, for the Monitor's popup
                                 "prompt_tokens": seen, "reused": last.get("reused"), "output_tokens": n,
                                 # the request's whole prompt, and the tokens read of it (None: an older engine)
                                 "prompt_total": len(ids), "prompt_read": last.get("prompt_read"),
@@ -6762,7 +6766,8 @@ def make_handler(svc: Service):
                             else:
                                 session = (req.get("session") or req.get("session_id")
                                            or req.get("root_session") or req.get("bundle"))
-                                result = svc.affinity.focus_session(session, str(req.get("snippet") or ""))
+                                result = svc.affinity.focus_session(session, str(req.get("snippet") or ""),
+                                                                    str(req.get("last_input") or ""))
                             self._json(200, {**result, **svc.affinity.view()})
                         elif path == "/api/queue/skip":
                             svc.affinity.skip()
@@ -6780,10 +6785,16 @@ def make_handler(svc: Service):
                             svc.affinity.reorder(req.get("order", []))
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/pause-request":
-                            svc.affinity.pause_request(req.get("id"))
+                            if req.get("session"):
+                                svc.affinity.pause_session(req["session"])
+                            if req.get("id"):
+                                svc.affinity.pause_request(req["id"])
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/unpause-request":
-                            svc.affinity.unpause_request(req.get("id"))
+                            if req.get("session"):
+                                svc.affinity.unpause_session(req["session"])
+                            if req.get("id"):
+                                svc.affinity.unpause_request(req["id"])
                             self._json(200, svc.affinity.view())
                         elif path == "/api/queue/wanted":
                             svc.affinity.set_wanted(req.get("id"), bool(req.get("wanted")))

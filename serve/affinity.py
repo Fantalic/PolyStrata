@@ -90,6 +90,23 @@ def last_user_snippet(req: dict, chars: int = 100) -> str:
     return ""
 
 
+def last_user_input(req: dict, chars: int = 4000) -> str:
+    """The last user message with its line breaks, cut to `chars`: the Monitor's full-input popup.
+    Works for plain text and content parts; other role types are ignored."""
+    for m in reversed(req.get("messages") or []):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            text = c
+        elif isinstance(c, list):
+            text = "\n".join(p.get("text") for p in c if isinstance(p, dict) and isinstance(p.get("text"), str))
+        else:
+            continue
+        return text.replace("\r\n", "\n").replace("\r", "\n").strip()[:chars]
+    return ""
+
+
 def first_user_snippet(req: dict, chars: int = 60) -> str:
     """The first user message's text on one line, cut to `chars`: a session's name for the queue
     view - a conversation's opening question is stable across its turns, where the last user
@@ -110,12 +127,14 @@ def first_user_snippet(req: dict, chars: int = 60) -> str:
 
 class Entry:
     """One waiting request, as the admission sees it (also what GET /api/queue shows)."""
-    __slots__ = ("id", "path", "snippet", "arrived", "arrived_mono", "defer_since", "ids", "plen", "deferred",
+    __slots__ = ("id", "path", "snippet", "last_input", "arrived", "arrived_mono", "defer_since", "ids", "plen", "deferred",
                  "reason", "session_name", "bundle", "session_id", "root_session", "agent", "wanted")
 
     def __init__(self, id: str, ids: list, path: str, snippet: str, session_name: str = "",
-                 session_id: str = "", root_session: str = "", agent: str = "", wanted: bool = False):
+                 session_id: str = "", root_session: str = "", agent: str = "", wanted: bool = False,
+                 last_input: str = ""):
         self.id, self.ids, self.path, self.snippet = id, ids, path, snippet
+        self.last_input = last_input
         self.session_name = session_name
         # the session bundle (plugin headers): every request of one root session - the main agent's
         # session and its sub-agent spawns - shares the root id and counts as one conversation
@@ -140,7 +159,8 @@ class Entry:
             state = "affinity"
         else:
             state = "queued"
-        return {"id": self.id, "path": self.path, "snippet": self.snippet, "arrived": self.arrived,
+        return {"id": self.id, "path": self.path, "snippet": self.snippet, "last_input": self.last_input,
+                "arrived": self.arrived,
                 "session_name": self.session_name,
                 "session_id": self.session_id, "root_session": self.root_session, "agent": self.agent,
                 "wanted": self.wanted,
@@ -167,6 +187,7 @@ class Affinity:
         self.running = True                   # queue accepts requests (True) or paused (False)
         self.paused = False                   # True while paused (for symmetry with running)
         self.paused_requests: set[str] = set()  # individual requests paused by user
+        self.paused_sessions: set[str] = set()  # conversations paused by session id
 
     def _hold_left(self, now=None) -> float:
         """Seconds left on the armed hold, with a pause frozen: while a quick unrelated request runs
@@ -181,14 +202,14 @@ class Affinity:
 
     # ---- registration -------------------------------------------------
     def register(self, id: str | None, ids: list, path: str = "", snippet: str = "", session_name: str = "",
-                 session_id: str = "", root_session: str = "", agent: str = "") -> Entry | None:
+                 session_id: str = "", root_session: str = "", agent: str = "", last_input: str = "") -> Entry | None:
         """A request starts waiting for the turn (None for a request without tokens: nothing to
         match, it runs as before)."""
         if not ids:
             return None
         entry = Entry(id or uuid.uuid4().hex[:12], ids, path or "", snippet or "", session_name=session_name,
                       session_id=session_id, root_session=root_session, agent=agent,
-                      wanted=bool(self.settings.get("wanted_default", False)))
+                      wanted=bool(self.settings.get("wanted_default", False)), last_input=last_input)
         with self.lock:
             self.waiting[entry.id] = entry
         return entry
@@ -220,6 +241,10 @@ class Affinity:
         if not self.running:                # queue paused: hold all big requests
             return False
         with self.lock:
+            # A paused conversation waits at the next admission point, even for small tool
+            # follow-ups: the running turn may finish, but its next request must queue.
+            if (entry.bundle or entry.session_id) in self.paused_sessions:
+                return False
             if entry.small(s["small_toks"]):        # rule 1: small always runs
                 if (s["hold_small"] == "pause" and self.hold is not None
                         and self.hold.get("paused_at") is None
@@ -340,11 +365,11 @@ class Affinity:
             if entry is None:
                 raise KeyError(id)
             self.focused = {"prefix": checkpoint(entry.ids, self.turn_id), "bundle": entry.bundle,
-                            "id": entry.id, "snippet": entry.snippet}
+                            "id": entry.id, "snippet": entry.snippet, "last_input": entry.last_input}
             self.hold = None
-            return {"focused": entry.id, "snippet": entry.snippet}
+            return {"focused": entry.id, "snippet": entry.snippet, "last_input": entry.last_input}
 
-    def focus_session(self, session: str, snippet: str = "") -> dict:
+    def focus_session(self, session: str, snippet: str = "", last_input: str = "") -> dict:
         """Pin a session by its bundle id so its next turn runs first, without needing a queued
         request.  A bundle id (root_session or session_id from the plugin headers) is enough to
         match the follow-up: _continues compares bundles before token prefixes.  Requests without
@@ -353,9 +378,10 @@ class Affinity:
         if not session:
             raise ValueError("session: a session id")
         with self.lock:
-            self.focused = {"prefix": [], "bundle": session, "id": session, "snippet": snippet}
+            self.focused = {"prefix": [], "bundle": session, "id": session, "snippet": snippet,
+                            "last_input": last_input}
             self.hold = None
-            return {"focused": session, "snippet": snippet}
+            return {"focused": session, "snippet": snippet, "last_input": last_input}
 
     def unfocus(self) -> None:
         with self.lock:
@@ -423,7 +449,8 @@ class Affinity:
             return {"settings": dict(self.settings), "waiting": waiting, "hold": hold,
                     "focused": focused, "counters": dict(self.counters),
                     "paused": self.paused, "running": self.running,
-                    "paused_requests": list(self.paused_requests)}
+                    "paused_requests": list(self.paused_requests),
+                    "paused_sessions": sorted(self.paused_sessions)}
 
     # ---- pause individual requests ------------------------------------
     def pause_request(self, id: str) -> None:
@@ -436,6 +463,23 @@ class Affinity:
         """Unpause a specific request: it can now take the turn like normal."""
         with self.lock:
             self.paused_requests.discard(id)
+
+    def pause_session(self, session: str) -> None:
+        """Pause a conversation by its session id: its next request queues at the next admission."""
+        session = str(session or "").strip()
+        with self.lock:
+            if session:
+                self.paused_sessions.add(session)
+
+    def unpause_session(self, session: str) -> None:
+        """Resume a conversation and release any of its already-queued requests."""
+        session = str(session or "").strip()
+        with self.lock:
+            if session:
+                self.paused_sessions.discard(session)
+                for entry in self.waiting.values():
+                    if (entry.bundle or entry.session_id or "") == session:
+                        self.paused_requests.discard(entry.id)
 
     # ---- manual reordering --------------------------------------------
     def reorder(self, order: list[str]) -> None:

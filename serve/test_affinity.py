@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 import serve.server as server
-from serve.affinity import Affinity, checkpoint, last_user_snippet, TURN_ID
+from serve.affinity import Affinity, checkpoint, last_user_snippet, last_user_input, TURN_ID
 from serve.frontend import ChatTemplate
 from serve.server import ByteTokenizer, MockEngine, Service
 from pathlib import Path
@@ -281,6 +281,45 @@ class AffinityRules(unittest.TestCase):
         parts = {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"},
                                                            {"type": "image_url", "url": "x"}]}]}
         self.assertEqual(last_user_snippet(parts), "hi")
+
+    def test_last_user_input_keeps_line_breaks_and_caps_length(self):
+        req = {"messages": [{"role": "user", "content": "line one\nline two\r\nline three"}]}
+        self.assertEqual(last_user_input(req), "line one\nline two\nline three")
+        long = "x" * 4500
+        self.assertEqual(len(last_user_input({"messages": [{"role": "user", "content": long}]})), 4000)
+        parts = {"messages": [{"role": "user", "content": [{"type": "text", "text": "a\nb"},
+                                                           {"type": "image_url", "url": "x"}]}]}
+        self.assertEqual(last_user_input(parts), "a\nb")
+        self.assertEqual(last_user_input({"messages": []}), "")
+
+    def test_entry_public_and_focus_expose_last_input(self):
+        a = Affinity(enabled=True, hold_s=30.0, small_toks=8192)
+        entry = a.register("r1", [1, 2, 3], path="/v1/chat/completions", snippet="hello",
+                           session_name="hello", session_id="s1", last_input="line one\nline two")
+        public = entry.public(a)
+        self.assertEqual(public["last_input"], "line one\nline two")
+        self.assertEqual(public["snippet"], "hello")
+        self.assertEqual(a.focus("r1")["last_input"], "line one\nline two")
+
+    def test_paused_session_blocks_small_and_large_requests(self):
+        a = Affinity(enabled=True, hold_s=30.0, small_toks=8192)
+        entry = a.register("r1", [1, 2, 3], snippet="hello", session_id="s1")
+        self.assertTrue(a.decide(entry))
+        a.pause_session("s1")
+        self.assertIn("s1", a.view()["paused_sessions"])
+        self.assertFalse(a.decide(entry))           # small request is held too
+        a.unpause_session("s1")
+        self.assertTrue(a.decide(entry))
+
+    def test_unpause_session_releases_waiting_requests(self):
+        a = Affinity(enabled=True, hold_s=30.0, small_toks=0)
+        entry = a.register("r1", list(range(9000)), snippet="hello", session_id="s1")
+        a.pause_request("r1")
+        a.pause_session("s1")
+        self.assertFalse(a.decide(entry))
+        a.unpause_session("s1")
+        self.assertNotIn("r1", a.view()["paused_requests"])
+        self.assertTrue(a.decide(entry))
 
 
 class AffinityOnService(unittest.TestCase):

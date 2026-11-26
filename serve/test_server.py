@@ -3581,6 +3581,7 @@ class WebApp(unittest.TestCase):
             self.assertEqual(metrics["live"][key], want)
             self.assertEqual(metrics["requests"][0][key], want)
         self.assertEqual(metrics["requests"][0]["snippet"], "track me")
+        self.assertEqual(metrics["requests"][0]["last_input"], "track me")
 
     def test_web_path_traversal_is_blocked(self):
         # the crucial part of the old "only the app files are served" test: a crafted
